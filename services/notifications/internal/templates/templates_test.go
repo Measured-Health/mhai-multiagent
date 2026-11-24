@@ -1,6 +1,7 @@
 package templates
 
 import (
+	"encoding/base32"
 	"regexp"
 	"slices"
 	"strings"
@@ -74,7 +75,9 @@ func allowed(t *testing.T, name, src string) bool {
 // allow-listed variables, with no other construct (no range, call, index
 // or function). A template that names anything else fails here.
 func TestTemplatesUseOnlyTheAllowList(t *testing.T) {
-	want := []string{"invite", "password_reset", "mfa_reset", "mfa_reminder", "review_reminder", "review_assigned"}
+	want := []string{"invite", "password_reset", "mfa_reset", "mfa_reminder", "review_reminder", "review_assigned",
+		"security_password_changed", "security_password_reset", "security_mfa_enabled", "security_mfa_replaced",
+		"security_backup_code_used", "security_backup_codes_made"}
 	if len(Kinds) != len(want) {
 		t.Fatalf("%d kinds", len(Kinds))
 	}
@@ -112,7 +115,8 @@ func TestRenderedEmailsCarryNothingElse(t *testing.T) {
 	link := "https://app.example.test/reset-password?token=SYNTHlinkValue0123"
 	urlRe := regexp.MustCompile(`https?://[^\s"'<>]+`)
 	for kind, k := range Kinds {
-		r, err := a.Render(kind, Vars{Link: link, Expires: exp, Hospital: "Synthetic General Hospital"})
+		r, err := a.Render(kind, Vars{Link: link, Expires: exp, Hospital: "Synthetic General Hospital",
+			When: FormatWhen(time.Date(2026, 11, 24, 14, 5, 0, 0, time.UTC))})
 		if err != nil {
 			t.Fatalf("%s: %v", kind, err)
 		}
@@ -176,6 +180,74 @@ func TestRenderRefusals(t *testing.T) {
 	if err != nil || !strings.Contains(r.Text, "https://app.example.test/") || strings.Contains(r.Text, "evil") ||
 		strings.Contains(r.Text, "Synth") {
 		t.Fatalf("notice: %v %s", err, r.Text)
+	}
+}
+
+// Security notices (product owner, 24 Nov 2026): fixed subject per kind,
+// what changed and when in UTC, which app, who to tell; no link of any
+// kind (not even the sign-in address), and nothing of what a caller might
+// pass (a secret link, a code, an otpauth secret, a hospital name). A
+// notice without its time is refused.
+func TestSecurityNotices(t *testing.T) {
+	a := app(t)
+	when := FormatWhen(time.Date(2026, 11, 24, 14, 5, 0, 0, time.FixedZone("WAT", 3600)))
+	if when != "24 November 2026 at 13:05 UTC" {
+		t.Fatal(when)
+	}
+	subjects := map[string]string{
+		"security_password_changed":  "Your MHAI password was changed",
+		"security_password_reset":    "Your MHAI password was reset",
+		"security_mfa_enabled":       "Two-step sign-in is now on for your MHAI account",
+		"security_mfa_replaced":      "Your MHAI two-step app was changed",
+		"security_backup_code_used":  "A backup code was used on your MHAI account",
+		"security_backup_codes_made": "New MHAI backup codes were made",
+		"mfa_reset":                  "Your MHAI two-step sign-in was reset",
+	}
+	n := 0
+	for kind, k := range Kinds {
+		if k.Security {
+			n++
+			if k.SecretLink || k.NeedsHospital {
+				t.Errorf("%s: a notice with a link or the hospital", kind)
+			}
+		}
+	}
+	if n != len(subjects) {
+		t.Fatalf("%d security kinds, want %d", n, len(subjects))
+	}
+	secret := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString([]byte("synthetic notice test phrase"))
+	code := "synth-bk-4821"
+	for kind, subject := range subjects {
+		k := Kinds[kind]
+		if !k.Security {
+			t.Fatalf("%s is not a security notice", kind)
+		}
+		r, err := a.Render(kind, Vars{When: when, Link: "https://app.example.test/x?secret=" + secret + "&code=" + code,
+			Expires: code, Hospital: "Synthetic General Hospital"})
+		if err != nil {
+			t.Fatalf("%s: %v", kind, err)
+		}
+		if r.Subject != subject {
+			t.Errorf("%s: subject %q", kind, r.Subject)
+		}
+		for part, body := range map[string]string{"text": r.Text, "html": r.HTML} {
+			for _, want := range []string{when, "clinical app", "If this wasn't you, contact your hospital administrator or " +
+				"info@measured-health.org straight away.", safety} {
+				if !strings.Contains(body, want) {
+					t.Errorf("%s %s lacks %q", kind, part, want)
+				}
+			}
+			for _, bad := range []string{"http", "href", "app.example.test", secret, code, "Synthetic General", "otpauth", "<img"} {
+				if strings.Contains(body, bad) {
+					t.Errorf("%s %s carries %q", kind, part, bad)
+				}
+			}
+		}
+		for _, w := range []string{"", "x<script>", "a\r\nBcc: x@example.test", strings.Repeat("9", 65)} {
+			if _, err := a.Render(kind, Vars{When: w}); err != ErrWhen {
+				t.Errorf("%s with time %q: %v", kind, w, err)
+			}
+		}
 	}
 }
 

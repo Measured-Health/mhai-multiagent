@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/delivery"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
 )
@@ -191,6 +192,11 @@ func (s *Service) challenge(w http.ResponseWriter, r *http.Request) {
 	}
 	s.clearMFA(ctx, rec.UserID)
 	if kind == kindBackup {
+		// checkCode recorded the notice with the code's use; hand it over.
+		if acct.HospitalID != nil {
+			s.afterNotice(ctx, *acct.HospitalID, uid, delivery.NoticeBackupCodeUsed)
+		}
+		// The used code was replaced by one new code (checkCode).
 		acct.RecoveryCodesLeft = backupCodeCount
 	}
 
@@ -394,6 +400,7 @@ func (s *Service) verify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var ok bool
+	var told uuid.UUID
 	err = s.withAuth(ctx, func(tx pgx.Tx) error {
 		row, err := loadMFA(ctx, tx, uid)
 		if err != nil || row == nil {
@@ -415,7 +422,13 @@ func (s *Service) verify(w http.ResponseWriter, r *http.Request) {
 		if pending {
 			action = "auth.mfa.enrolled"
 		}
-		return writeAudit(ctx, tx, r, action, c.Sub, c.Hid, "user", c.Sub, map[string]any{"confirmed": true})
+		if err := writeAudit(ctx, tx, r, action, c.Sub, c.Hid, "user", c.Sub, map[string]any{"confirmed": true}); err != nil {
+			return err
+		}
+		if pending {
+			told = s.notice(ctx, tx, uid, delivery.NoticeMFAEnabled)
+		}
+		return nil
 	})
 	if err != nil {
 		s.fail(w, r, "internal_error", "auth: mfa verify failed", "user_id", c.Sub)
@@ -428,6 +441,7 @@ func (s *Service) verify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.clearMFA(ctx, c.Sub)
+	s.afterNotice(ctx, told, uid, delivery.NoticeMFAEnabled)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -467,6 +481,7 @@ func (s *Service) recoveryCodes(w http.ResponseWriter, r *http.Request) {
 		hashes[i] = keys.hashBackup(code)
 	}
 	var stepErr error
+	var told uuid.UUID
 	err = s.withAuth(ctx, func(tx pgx.Tx) error {
 		if stepErr = s.StepUp(ctx, tx, c.Sub, in.MFACode, in.BackupCode); stepErr != nil {
 			return errStepUpRefused
@@ -481,7 +496,12 @@ func (s *Service) recoveryCodes(w http.ResponseWriter, r *http.Request) {
 		if err != nil || tag.RowsAffected() != 1 {
 			return errors.New("replace backup codes failed")
 		}
-		return writeAudit(ctx, tx, r, "auth.mfa.codes_regenerated", c.Sub, c.Hid, "user", c.Sub, map[string]any{"count": len(codes)})
+		if err := writeAudit(ctx, tx, r, "auth.mfa.codes_regenerated", c.Sub, c.Hid, "user", c.Sub,
+			map[string]any{"count": len(codes)}); err != nil {
+			return err
+		}
+		told = s.notice(ctx, tx, uid, delivery.NoticeBackupCodesMade)
+		return nil
 	})
 	if errors.Is(err, errStepUpRefused) {
 		switch {
@@ -497,5 +517,6 @@ func (s *Service) recoveryCodes(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, "internal_error", "auth: regenerate backup codes failed", "user_id", c.Sub)
 		return
 	}
+	s.afterNotice(ctx, told, uid, delivery.NoticeBackupCodesMade)
 	httpx.JSON(w, http.StatusOK, recoveryCodesResponse{RecoveryCodes: codes})
 }

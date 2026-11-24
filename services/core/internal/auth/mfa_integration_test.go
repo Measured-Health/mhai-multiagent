@@ -27,6 +27,7 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/auth"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/delivery"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
@@ -441,6 +442,8 @@ func TestBackupCodeRenewedAtSignIn(t *testing.T) {
 	if s := storedBackup(t, u.id); len(s) != 1 || s[0] != backupHash(t, nb) {
 		t.Fatal("the stored hash is not the new code's")
 	}
+	// The renewal keeps the security notice: exactly one for the use.
+	oneNotice(t, u.id, delivery.NoticeBackupCodeUsed)
 	if rf := e.refresh(t, r.body["refresh_token"].(string)); rf.code != 200 {
 		t.Fatalf("refresh of a backup-code session: %d", rf.code)
 	}
@@ -581,8 +584,12 @@ func TestStepUpBackupCodeRenewal(t *testing.T) {
 	if s := storedBackup(t, u.id); len(s) != 1 || s[0] != backupHash(t, code) {
 		t.Fatal("a rolled-back step-up changed the backup code")
 	}
+	if n := notices(t, u.id, delivery.NoticeBackupCodeUsed); n != 0 {
+		t.Fatalf("a rolled-back step-up left %d backup-code notices", n)
+	}
 	// It succeeds: 2xx with the new code; the old one is refused (no header).
 	code2 := header("in-tx", e.stepUpProbe(t, inTx, at, map[string]any{"backup_code": code}), 204, true)
+	oneNotice(t, u.id, delivery.NoticeBackupCodeUsed)
 	header("replay", e.stepUpProbe(t, inTx, at, map[string]any{"backup_code": code}), 403, false)
 	// In its own transaction (StepUpAudited): the burn stands even when the
 	// write fails, so the error reply carries the new code.

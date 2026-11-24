@@ -239,7 +239,9 @@ func TestRateLimitsHold(t *testing.T) {
 		t.Fatal("mfa_reset not mandatory")
 	}
 	for k, want := range map[string]bool{"invite": true, "password_reset": true, "mfa_reset": true, "mfa_reminder": false,
-		"review_reminder": false, "review_assigned": false} {
+		"review_reminder": false, "review_assigned": false, "security_password_changed": true, "security_password_reset": true,
+		"security_mfa_enabled": true, "security_mfa_replaced": true, "security_backup_code_used": true,
+		"security_backup_codes_made": true} {
 		if Mandatory(k) != want {
 			t.Errorf("%s mandatory %v", k, !want)
 		}

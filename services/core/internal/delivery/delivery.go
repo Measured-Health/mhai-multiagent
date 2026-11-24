@@ -15,6 +15,13 @@
 // link, which it alone may see. With CORE_NOTIFY_ENABLED, core's drainer
 // (internal/notify) publishes each due row's id to the notifications
 // service after commit (notifications design §9.1).
+//
+// Security notices (a password changed or reset, two-step turned on or
+// moved to a new app, a backup code used or new ones made) are recorded by
+// Notice in the change's own transaction, through a definer (migration
+// 00058). Unlike the admin actions, a change never waits on them: with no
+// sender, or if the notice can't be recorded, the change goes ahead and
+// the failure is logged.
 package delivery
 
 import (
@@ -22,6 +29,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -39,7 +47,27 @@ const (
 	MFAReminder    Kind = "mfa_reminder"
 	ReviewReminder Kind = "review_reminder"
 	ReviewAssigned Kind = "review_assigned"
+
+	// The security notices (migration 00058): told to the account's own
+	// address when its security changes. Recorded by Notice, never by
+	// Record.
+	NoticePasswordChanged Kind = "security_password_changed"
+	NoticePasswordReset   Kind = "security_password_reset"
+	NoticeMFAEnabled      Kind = "security_mfa_enabled"
+	NoticeMFAReplaced     Kind = "security_mfa_replaced"
+	NoticeBackupCodeUsed  Kind = "security_backup_code_used"
+	NoticeBackupCodesMade Kind = "security_backup_codes_made"
 )
+
+// SecurityNotices are the kinds Notice records.
+var SecurityNotices = []Kind{NoticePasswordChanged, NoticePasswordReset, NoticeMFAEnabled, NoticeMFAReplaced,
+	NoticeBackupCodeUsed, NoticeBackupCodesMade}
+
+// IsSecurityNotice reports whether k is one of SecurityNotices.
+func IsSecurityNotice(k Kind) bool { return slices.Contains(SecurityNotices, k) }
+
+// ErrNotNotice: Notice was given a kind that isn't a security notice.
+var ErrNotNotice = errors.New("delivery: not a security notice kind")
 
 // Message is one message to one person of one hospital.
 type Message struct {
@@ -82,6 +110,38 @@ func Record(ctx context.Context, tx pgx.Tx, s Sender, m Message) error {
 	_, err := tx.Exec(ctx, `INSERT INTO message_outbox (hospital_id, recipient_id, kind, subject_id, channel, created_by)
 		VALUES ($1, $2, $3, $4, $5, $6)`, m.HospitalID, m.Recipient, string(m.Kind), subject, s.Channel(), m.By)
 	return err
+}
+
+// Notice records a security notice of kind for user in tx, through
+// mhai_security_notice (migration 00058; tx runs as mhai_auth): the
+// recipient's hospital is the database's, never the caller's. It runs in a
+// savepoint, so a failure here never aborts the change it reports: the
+// caller logs it and goes on. It returns the recipient's hospital when a row
+// was written, and uuid.Nil when none was (a platform account, an inactive
+// one, or one already told of this kind in this minute).
+func Notice(ctx context.Context, tx pgx.Tx, s Sender, user uuid.UUID, kind Kind) (uuid.UUID, error) {
+	if s == nil {
+		return uuid.Nil, ErrNoSender
+	}
+	if !IsSecurityNotice(kind) || user == uuid.Nil {
+		return uuid.Nil, ErrNotNotice
+	}
+	// A named savepoint in the caller's transaction (not a new one).
+	if _, err := tx.Exec(ctx, `SAVEPOINT mhai_security_notice`); err != nil {
+		return uuid.Nil, err
+	}
+	var h *uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT mhai_security_notice($1, $2, $3)`, user, string(kind), s.Channel()).Scan(&h); err != nil {
+		_, _ = tx.Exec(ctx, `ROLLBACK TO SAVEPOINT mhai_security_notice`)
+		return uuid.Nil, err
+	}
+	if _, err := tx.Exec(ctx, `RELEASE SAVEPOINT mhai_security_notice`); err != nil {
+		return uuid.Nil, err
+	}
+	if h == nil {
+		return uuid.Nil, nil
+	}
+	return *h, nil
 }
 
 // Log is the development sender: it logs that a message is due, by kind

@@ -14,6 +14,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -34,6 +35,9 @@ type Message struct {
 	// secret link (memory only, never logged), when it stops working, and
 	// the hospital's display name for an invitation. "" otherwise.
 	Link, Expires, HospitalName string
+	// When is when the message was due: a security notice states it (the
+	// time of the change). Zero otherwise.
+	When time.Time
 }
 
 // Outcome is what a channel did with a message.

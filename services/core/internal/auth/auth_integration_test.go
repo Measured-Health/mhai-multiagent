@@ -29,6 +29,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/delivery"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/intel"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
@@ -160,6 +161,9 @@ func newEnv(t *testing.T) *env {
 		// on a shared runner makes argon2 slow. TestArgonGateBusy and the
 		// gate's unit tests cover the limit itself.
 		Argon: password.NewGate(64, time.Minute),
+		// The development sender: security notices are recorded in the
+		// outbox (notices_integration_test.go).
+		Notices: delivery.Log{Logger: logx.New(e.logs)},
 	}
 	log := logx.New(e.logs)
 	e.guard = &authz.Guard{

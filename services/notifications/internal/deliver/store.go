@@ -39,6 +39,9 @@ type Claim struct {
 	NextAttempt time.Time
 	// Address is set only for the email channel and an active recipient.
 	Address string
+	// Created is when the message was due: for a security notice, when
+	// the change happened (migration 00058).
+	Created time.Time
 }
 
 // Finish is how a claimed delivery ends or waits.
@@ -85,10 +88,12 @@ func (p PG) Claim(ctx context.Context, hospital, message uuid.UUID, lease time.D
 			kind, ch, addr pgtype.Text
 			attempts       pgtype.Int4
 			first, next    pgtype.Timestamptz
+			created        pgtype.Timestamptz
 		)
 		if err := tx.QueryRow(ctx, `SELECT outcome, lease_id, kind, recipient_id, subject_id, channel, attempts,
-			first_attempt_at, next_attempt_at, address FROM notify_claim($1, make_interval(secs => $2))`,
-			message, lease.Seconds()).Scan(&c.Outcome, &lid, &kind, &rec, &subj, &ch, &attempts, &first, &next, &addr); err != nil {
+			first_attempt_at, next_attempt_at, address, created_at FROM notify_claim($1, make_interval(secs => $2))`,
+			message, lease.Seconds()).Scan(&c.Outcome, &lid, &kind, &rec, &subj, &ch, &attempts, &first, &next, &addr,
+			&created); err != nil {
 			return err
 		}
 		if lid.Valid {
@@ -102,7 +107,7 @@ func (p PG) Claim(ctx context.Context, hospital, message uuid.UUID, lease time.D
 		}
 		c.Kind, c.Channel, c.Address = kind.String, ch.String, addr.String
 		c.Attempts = int(attempts.Int32)
-		c.FirstAttempt, c.NextAttempt = ts(first), ts(next)
+		c.FirstAttempt, c.NextAttempt, c.Created = ts(first), ts(next), ts(created)
 		return nil
 	})
 	return c, err

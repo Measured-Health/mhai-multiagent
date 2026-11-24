@@ -24,6 +24,7 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/bus"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/delivery"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/password"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/token"
@@ -63,6 +64,12 @@ type Service struct {
 	// defaults to password.DefaultGate, one slot per CPU. A request that
 	// can't get a slot in time gets 503 not_ready.
 	Argon *password.Gate
+	// Notices records the security notices (a password changed or reset,
+	// two-step turned on, a backup code used or new ones made) in the
+	// change's own transaction and hands them over after it (CORE_DELIVERY;
+	// migration 00058). Nil: no notice is recorded, and the change still
+	// goes ahead.
+	Notices delivery.Sender
 }
 
 func (s *Service) argon() *password.Gate {
