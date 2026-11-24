@@ -10,9 +10,9 @@ import (
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/testutil"
 )
 
-// Migration 00058 (adding a hospital from the platform app) goes down
+// Migration 00059 (adding a hospital from the platform app) goes down
 // cleanly, taking its columns, function and grants with it, and up again.
-func TestMigration00058DownUp(t *testing.T) {
+func TestMigration00059DownUp(t *testing.T) {
 	pg := testutil.StartPostgres(t)
 	ctx := context.Background()
 	if err := db.MigrateUp(ctx, pg.URL); err != nil {
@@ -23,8 +23,8 @@ func TestMigration00058DownUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if err := db.MigrateDownTo(ctx, pg.URL, 57); err != nil {
-		t.Fatalf("down to 57: %v", err)
+	if err := db.MigrateDownTo(ctx, pg.URL, 58); err != nil {
+		t.Fatalf("down to 58: %v", err)
 	}
 	var cols, fns int
 	var insert bool

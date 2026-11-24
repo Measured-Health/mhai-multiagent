@@ -377,7 +377,7 @@ func init() {
 	Register("auth.mfa.replaced", Schema{Fields: fields("trusted_devices_revoked", count), Required: []string{"trusted_devices_revoked"}})
 
 	// Plan 2: the provisioning CLI (internal/account).
-	// via platform: POST /platform/hospitals (migration 00058).
+	// via platform: POST /platform/hospitals (migration 00059).
 	Register("hospital.created", Schema{Fields: fields("via", OneOf("cli", "platform")), Required: []string{"via"}})
 	Register("hospital.activated", Schema{Fields: fields("via", OneOf("cli"), "from", OneOf("setup_incomplete")),
 		Required: []string{"via", "from"}})

@@ -1,7 +1,7 @@
 -- Adding a hospital from the platform app (POST /platform/hospitals;
 -- mhai-web's "Add hospital" form, product owner 24 Nov 2026). Until now a
 -- hospital was made only by the provisioning CLI (core hospitals create, as
--- mhai_provision). Numbered 00058: main has 00057 (two-step replace) and
+-- mhai_provision). Numbered 00059: main has 00058 (security notices, #279) and
 -- 00051 is held by the open documents PR (#230).
 --
 -- The hospital keeps what the form sends and the CLI never asked for:

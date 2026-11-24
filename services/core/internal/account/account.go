@@ -2,7 +2,7 @@
 // on a provisioning login (a plain member of mhai_provision, see migration
 // 00004): the gateway's own roles cannot insert users, roles or hospitals,
 // and the provisioning role can do little else. The platform app's add
-// hospital (internal/platform, migration 00058) shares its checks only
+// hospital (internal/platform, migration 00059) shares its checks only
 // (CheckNewHospital, NormaliseEmail, ValidEmail), never its writes.
 package account
 

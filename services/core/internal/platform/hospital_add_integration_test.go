@@ -29,7 +29,7 @@ import (
 )
 
 // POST /platform/hospitals (mhai-web's "Add hospital" form; migration
-// 00058) through core's whole chain. Every name, code, domain and email
+// 00059) through core's whole chain. Every name, code, domain and email
 // here is synthetic.
 
 // testAppURL is the clinical app's address the test server builds links on.

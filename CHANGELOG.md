@@ -42,12 +42,29 @@ All notable changes to this project are documented here. The format follows
   now shows `country`, `email_domains` and `first_admin` (pending, accepted
   or expired), and leaves an admin who hasn't accepted their invite out of
   `admins`. No sender is 503 `no_delivery` before anything changes.
-  Migration 00058 adds `hospitals.country`, `email_domains` and
+  Migration 00059 adds `hospitals.country`, `email_domains` and
   `first_admin_id`, and gives `mhai_platform` exactly the inserts of a
   hospital its own transaction makes (never a password, a platform
   account or an existing hospital). The CLI's hospital name is now held to
   1 to 120 characters with no control characters, and `Local` is no longer
   taken as a time zone. Core OpenAPI 1.38.0.
+- **Security notice emails.** A person is emailed at their own address when
+  their password is changed or set with a reset link, two-step is turned on
+  or moved to a new authenticator app, a backup code is used (at sign-in or
+  as a step-up), or new backup codes are made; a hospital admin's two-step
+  reset (`mfa_reset`) now uses the same notice. Each says what changed, when
+  (UTC) and in which app, and "If this wasn't you, contact your hospital
+  administrator or info@measured-health.org straight away"; no link, code,
+  secret or patient data, no tracking. One outbox kind per event
+  (`security_*`), recorded in the change's own transaction through the
+  definer `mhai_security_notice` (migration 00058; EXECUTE for `mhai_auth`
+  only), so a rolled-back change tells nobody and a failure to record never
+  blocks the change. At most one per kind, account and minute; mandatory
+  (no hospital cap, no opt-out). Platform accounts get none yet (the outbox
+  is per hospital). `notify_claim` also returns the outbox row's
+  `created_at`. deploy/README.md, "Turn on email for the demo";
+  services/notifications/README.md, "Security notices".
+
 - **Move two-step to a new authenticator app, without an admin.** A signed-in
   user with two-step on calls `POST /auth/mfa/replace` with a step-up code
   (`mfa_code` or `backup_code`) and gets a new secret (`otpauth_uri`), kept

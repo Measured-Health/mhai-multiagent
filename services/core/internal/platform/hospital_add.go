@@ -1,7 +1,7 @@
 package platform
 
 // Adding a hospital from the platform app (mhai-web's "Add hospital" form;
-// product owner, 24 Nov 2026; migration 00058):
+// product owner, 24 Nov 2026; migration 00059):
 //
 //   POST /platform/hospitals {name, short_code, country, time_zone,
 //   email_domains, first_admin: {name, email}, mfa_code | backup_code} →
@@ -24,7 +24,7 @@ package platform
 // an account already has 409 email_in_use. The first admin's email need
 // not be in email_domains (mhai-web's sample API doesn't ask it either).
 //
-// In one transaction, as mhai_platform (00058 holds every write to the
+// In one transaction, as mhai_platform (00059 holds every write to the
 // hospital this transaction makes): the hospital, setup_incomplete, as the
 // CLI leaves it (it is activated as before: core hospitals activate); its
 // settings, two-step required for clinicians (as the live site's CLI
@@ -70,7 +70,7 @@ const (
 	// hospitalAddScope is the idempotency_keys scope of the add's rate
 	// counter.
 	hospitalAddScope = "platform.hospital.add_rate"
-	// MaxEmailDomains is a hospital's most email domains (00058's CHECK).
+	// MaxEmailDomains is a hospital's most email domains (00059's CHECK).
 	MaxEmailDomains = 20
 	// emailDomainMax is a domain's longest, in bytes.
 	emailDomainMax = 253
@@ -215,7 +215,7 @@ func (d Deps) inviteLink(plain string) string {
 func (d Deps) addHospital(ctx context.Context, tx pgx.Tx, h newHospital, by uuid.UUID, rid string) (Hospital, delivery.Message, error) {
 	hid, admin := uuid.New(), uuid.New()
 	var msg delivery.Message
-	// The first admin is named now; their row follows (00058's deferred
+	// The first admin is named now; their row follows (00059's deferred
 	// key).
 	if _, err := tx.Exec(ctx, `INSERT INTO hospitals (id, name, short_code, time_zone, country, email_domains, first_admin_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)`, hid, h.name, h.code, h.timeZone, h.country, h.domains, admin); err != nil {
@@ -225,7 +225,7 @@ func (d Deps) addHospital(ctx context.Context, tx pgx.Tx, h newHospital, by uuid
 		return Hospital{}, msg, err
 	}
 	// Two-step for clinicians from the start, as the live site's CLI
-	// onboarding (--require-mfa-for-clinicians); 00058 holds it true.
+	// onboarding (--require-mfa-for-clinicians); 00059 holds it true.
 	if _, err := tx.Exec(ctx, `INSERT INTO hospital_settings (hospital_id, require_mfa_for_clinicians) VALUES ($1, true)`,
 		hid); err != nil {
 		return Hospital{}, msg, err
