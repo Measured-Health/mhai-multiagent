@@ -276,10 +276,12 @@ var Catalogue = map[string]Entry{
 	"auth.mfa.replaced":        withheld(),
 
 	// Plan 2: the provisioning CLI.
-	"hospital.created":   {Type: "hospital_settings", Kind: "hospital_added", Target: entityTarget("hospital", "hospital")},
-	"hospital.updated":   {Type: "hospital_settings", Kind: "hospital_updated", Target: entityTarget("hospital", "hospital")},
-	"hospital.activated": withheld(),
-	"user.created":       withheld(),
+	"hospital.created":     {Type: "hospital_settings", Kind: "hospital_added", Target: entityTarget("hospital", "hospital")},
+	"hospital.updated":     {Type: "hospital_settings", Kind: "hospital_updated", Target: entityTarget("hospital", "hospital")},
+	"hospital.deactivated": {Type: "hospital_settings", Kind: "hospital_deactivated", Target: entityTarget("hospital", "hospital")},
+	"hospital.reactivated": {Type: "hospital_settings", Kind: "hospital_reactivated", Target: entityTarget("hospital", "hospital")},
+	"hospital.activated":   withheld(),
+	"user.created":         withheld(),
 	// Cloud model providers (Task 2): mhai-web has no kind for a model
 	// policy change yet; sent bare until it has one.
 	"hospital.model_policy_changed": withheld(),

@@ -82,12 +82,12 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 	// its reason. A new grant to the platform fails here until it is
 	// justified in this list.
 	wantRelations := map[string]string{
-		"hospitals":                "00003: names and status for the platform screens; 00059: INSERT of a new setup_incomplete hospital with its first admin (columns); UPDATE of the five details and version of one not removed (columns)",
+		"hospitals":                "00003: names and status for the platform screens; 00059: INSERT of a new setup_incomplete hospital with its first admin (columns); UPDATE of the five details and version of one not removed (columns); 00060: UPDATE (status), held by a trigger to deactivating and reactivating",
 		"users":                    "00003: column SELECT without password_hash (the audit's actor, people search); 00037: UPDATE (is_active) of platform accounts only; 00059: INSERT of a new hospital's invited first admin only (columns, no password)",
 		"platform_users":           "00003: security_invoker view over users' granted columns",
 		"user_roles":               "00003: roles of the audit's actors; 00037: INSERT, DELETE of platform roles of platform accounts only; 00059: hospital_admin for a new hospital's first admin",
-		"sessions":                 "00003: session metadata (no tokens: those are refresh_tokens); 00037: UPDATE (revoked_at) of platform accounts' sessions",
-		"audit_log":                "00003: read the chain; append its eight actions (00014 platform_append); 00059: hospital.created and staff.invited of a hospital its own transaction adds",
+		"sessions":                 "00003: session metadata (no tokens: those are refresh_tokens); 00037: UPDATE (revoked_at) of platform accounts' sessions; 00060: and of a deactivated hospital's accounts' open sessions",
+		"audit_log":                "00003: read the chain; append its eight actions (00014 platform_append); 00059: hospital.created and staff.invited of a hospital its own transaction adds; 00060: hospital.deactivated and hospital.reactivated",
 		"audit_checkpoints":        "00003: the chain's checkpoints, for verification",
 		"idempotency_keys":         "00003: Idempotency-Key replies of platform writes, null-hospital rows only",
 		"audit_verify_runs":        "00014: the chain checks",
@@ -109,6 +109,7 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		"hospital_settings":        "00059: the settings row of a hospital its own transaction adds, two-step for clinicians on (column INSERT)",
 		"account_tokens":           "00059: the first admin's invite of a hospital its own transaction adds (column INSERT); invite rows without token_hash, for the first admin's status (column SELECT)",
 		"message_outbox":           "00059: the first admin's invite row of a hospital its own transaction adds (column INSERT)",
+		"hospital_deactivations":   "00060: who deactivated a hospital and why (SELECT); an open record for a hospital now deactivated (column INSERT); closing it on reactivation (column UPDATE)",
 	}
 	got := map[string]bool{}
 	rows, err := pool.Query(ctx, `
