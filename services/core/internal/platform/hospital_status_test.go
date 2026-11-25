@@ -32,7 +32,7 @@ func TestCheckDeactivation(t *testing.T) {
 		note   *string
 	}{
 		{"", nil}, {"bored", nil}, {"Contract_ended", nil}, {"other", nil}, {"other", sp(" \n ")},
-		{"other", sp(strings.Repeat("x", 501))}, {"contract_ended", sp("bell\x07")}, {"contract_ended", sp("zero​width")},
+		{"other", sp(strings.Repeat("x", 501))}, {"contract_ended", sp("bell\x07")}, {"contract_ended", sp("zero\u200bwidth")},
 		{"contract_ended", sp("see P-AB12CD")},
 	} {
 		if got, ok := platform.CheckDeactivation(c.reason, c.note); ok {
