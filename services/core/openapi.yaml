@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.39.0"
+  version: "1.40.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -4272,8 +4272,11 @@ paths:
         out) and the open legal holds in short form. A hospital added with
         `POST /platform/hospitals` has its `country`, `email_domains` and
         `first_admin`; one the CLI made has `country` "", `email_domains` []
-        and `first_admin` null. Core keeps no deactivation record or removal
-        request: `deactivation` and `removal` are null. `version` is the
+        and `first_admin` null. Core keeps no removal request: `removal` is
+        null. `deactivation` is who deactivated the hospital, when and why
+        while it is deactivated through `POST
+        /platform/hospitals/{id}/deactivate` (1.40.0), else null (a
+        hospital deactivated by hand has none). `version` is the
         hospital's, 1 until `PATCH /platform/hospitals/{id}` changes it
         (1.39.0). A hold keeps every record (scope
         `from` and `to` null); its `review_on` is six months after it was
@@ -4340,6 +4343,121 @@ paths:
       responses:
         "200":
           description: The hospital.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformHospital" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/hospitals/{id}/deactivate:
+    post:
+      operationId: deactivatePlatformHospital
+      summary: Deactivate a hospital.
+      description: |
+        Platform admins only (auditors 403 `forbidden`), on a two-step
+        session, with step-up: exactly one of `mfa_code` or `backup_code`
+        (none 403 `mfa_required`; wrong, or both, 403 `mfa_invalid`, audited
+        `auth.mfa.failed`; too many 429 `mfa_locked`, audited). `reason` is
+        one of the four codes. `note` is optional text, trimmed, 1 to 500
+        characters, newlines allowed, no other control character and nothing
+        shaped like a patient pseudonym; blank or null is no note; it is
+        required for `other`. A bad body, an unknown field or any query is
+        422 `validation_failed`. Allowed from `active` and
+        `setup_incomplete`; any other status is 409 `conflict` and an
+        unknown id 404, both before a code is spent. In one transaction: the
+        status `deactivated`, `version` up by one, the deactivation record
+        (who, when, the reason, the note and the status left), every open
+        session of the hospital's accounts revoked (and put on the denylist
+        after commit, so its staff are signed out at once), and one
+        `hospital.deactivated` entry `{hospital_id, reason, from,
+        sessions_revoked}`, never the note. The hospital's queued and
+        running questions are cancelled. At most 10 deactivations and
+        reactivations a minute per session (429 `rate_limited`). An
+        `Idempotency-Key` retry is answered from the stored reply. The reply
+        is the hospital's page. Added in 1.40.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-step-up: true
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, validation_failed, conflict, rate_limited, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              additionalProperties: false
+              properties:
+                reason: { type: string, enum: [contract_ended, security_concern, hospital_request, other] }
+                note: { type: string, nullable: true, maxLength: 500 }
+                mfa_code: { type: string, maxLength: 64 }
+                backup_code: { type: string, maxLength: 64 }
+      responses:
+        "200":
+          description: The hospital, deactivated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformHospital" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /platform/hospitals/{id}/reactivate:
+    post:
+      operationId: reactivatePlatformHospital
+      summary: Reactivate a deactivated hospital.
+      description: |
+        Platform admins only, on a two-step session, with step-up, as
+        deactivate. `reason` is required text, with the note's rules. Allowed
+        from `deactivated` with an open deactivation record (one deactivated
+        by hand has none): any other state is 409 `conflict`, an unknown id
+        404, both before a code is spent. In one transaction: the status
+        goes back to the one the record left (`active` or
+        `setup_incomplete`), `version` up by one, the record closed (who,
+        when, why) and kept, and one `hospital.reactivated` entry
+        `{hospital_id, to}`, never the reason. The staff sign in again
+        themselves. Rate limit and `Idempotency-Key` as deactivate. The
+        reply is the hospital's page, `deactivation` null. Added in 1.40.0.
+      tags: [platform]
+      security: [{ ServiceKey: [], Bearer: [] }]
+      x-step-up: true
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, validation_failed, conflict, rate_limited, not_ready, internal_error]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/ClientIP"
+        - $ref: "#/components/parameters/Audience"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              additionalProperties: false
+              properties:
+                reason: { type: string, minLength: 1, maxLength: 500 }
+                mfa_code: { type: string, maxLength: 64 }
+                backup_code: { type: string, maxLength: 64 }
+      responses:
+        "200":
+          description: The hospital, reactivated.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PlatformHospital" }
@@ -6819,7 +6937,25 @@ components:
         time_zone: { type: string }
         email_domains: { type: array, maxItems: 20, items: { type: string }, description: "Empty for a hospital the CLI made." }
         version: { type: integer, minimum: 1 }
-        deactivation: { type: object, nullable: true }
+        deactivation:
+          type: object
+          nullable: true
+          description: >-
+            Who deactivated the hospital, when and why (1.40.0); null unless
+            it was deactivated through the platform and not yet reactivated.
+          required: [by, at, reason, note]
+          additionalProperties: false
+          properties:
+            by:
+              type: object
+              required: [id, name]
+              additionalProperties: false
+              properties:
+                id: { type: string, format: uuid }
+                name: { type: string }
+            at: { type: string, format: date-time }
+            reason: { type: string, enum: [contract_ended, security_concern, hospital_request, other] }
+            note: { type: string, nullable: true, maxLength: 500 }
         first_admin:
           type: object
           nullable: true

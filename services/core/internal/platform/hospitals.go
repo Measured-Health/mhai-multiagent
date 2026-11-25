@@ -13,6 +13,8 @@ package platform
 //     hospital and invite its first hospital admin (hospital_add.go).
 //   - PATCH /platform/hospitals/{id}: platform admins edit its details
 //     (hospital_edit.go); version is the hospital's (00059).
+//   - POST /platform/hospitals/{id}/deactivate and /reactivate: platform
+//     admins, with step-up (hospital_status.go; 00060).
 //   - GET /platform/hospitals/{id}: the same readers; the summary and the
 //     page's parts: the active hospital admins to contact and the open
 //     legal holds in short form.
@@ -24,8 +26,10 @@ package platform
 // provisioning CLI made has none of them. What core doesn't keep is sent
 // empty, never invented: country "" and email_domains [] for a CLI
 // hospital (until an edit sets them), first_admin null when there is no
-// first admin, sso_enabled false, and deactivation and
-// removal null (no deactivation record or removal request exists in core).
+// first admin, sso_enabled false, removal null (no removal request exists
+// in core), and deactivation null unless the platform deactivated it and
+// it is not yet reactivated (00060; a hospital deactivated by hand has
+// none).
 // first_admin's status is its latest invite's: accepted once the link was
 // used, pending while it is live, expired otherwise. A hospital admin
 // whose invite is not yet accepted is not among the admins to contact. A legal hold always keeps
@@ -82,6 +86,9 @@ func registerHospitals(m *authz.Mux, d Deps) {
 	authz.Route(m, http.MethodPatch, "/platform/hospitals/{id}",
 		authz.Rule{Platform: true, NeedsMFA: true, AnyRole: []string{authz.RolePlatformAdmin}, Write: true},
 		http.HandlerFunc(d.hospitalEdit))
+	statusRule := authz.Rule{Platform: true, NeedsMFA: true, AnyRole: []string{authz.RolePlatformAdmin}, Write: true, StepUp: true}
+	authz.Route(m, http.MethodPost, "/platform/hospitals/{id}/deactivate", statusRule, http.HandlerFunc(d.hospitalDeactivate))
+	authz.Route(m, http.MethodPost, "/platform/hospitals/{id}/reactivate", statusRule, http.HandlerFunc(d.hospitalReactivate))
 	authz.Route(m, http.MethodGet, "/platform/hospitals/{id}", read, http.HandlerFunc(d.hospitalGet))
 	authz.Route(m, http.MethodGet, "/platform/hospitals/{id}/sso", read, http.HandlerFunc(d.hospitalSSO))
 }
@@ -127,7 +134,7 @@ type Hospital struct {
 	TimeZone     string          `json:"time_zone"`
 	EmailDomains []string        `json:"email_domains"`
 	Version      int             `json:"version"`
-	Deactivation *struct{}       `json:"deactivation"`
+	Deactivation *Deactivation   `json:"deactivation"`
 	FirstAdmin   *FirstAdmin     `json:"first_admin"`
 	Removal      *struct{}       `json:"removal"`
 	Admins       []HospitalAdmin `json:"admins"`
@@ -343,6 +350,9 @@ func readHospital(ctx context.Context, tx pgx.Tx, hid uuid.UUID) (Hospital, erro
 	}
 	if out.EmailDomains == nil {
 		out.EmailDomains = []string{}
+	}
+	if out.Deactivation, err = readDeactivation(ctx, tx, hid); err != nil {
+		return out, err
 	}
 	if firstAdmin != nil {
 		if out.FirstAdmin, err = readFirstAdmin(ctx, tx, *firstAdmin); err != nil {

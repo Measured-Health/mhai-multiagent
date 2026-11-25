@@ -386,6 +386,15 @@ func init() {
 	Register("hospital.updated", Schema{Fields: fields("hospital_id", id,
 		"fields", List(5, OneOf("name", "short_code", "country", "time_zone", "email_domains")),
 		"via", OneOf("platform")), Required: []string{"hospital_id", "fields", "via"}})
+	// POST /platform/hospitals/{id}/deactivate and /reactivate (00060): the
+	// reason's code, the status left and restored, and how many sessions
+	// the deactivation ended; never the note or the reactivation's reason.
+	Register("hospital.deactivated", Schema{Fields: fields("hospital_id", id,
+		"reason", OneOf("contract_ended", "security_concern", "hospital_request", "other"),
+		"from", OneOf("active", "setup_incomplete"), "sessions_revoked", count),
+		Required: []string{"hospital_id", "reason", "from", "sessions_revoked"}})
+	Register("hospital.reactivated", Schema{Fields: fields("hospital_id", id, "to", OneOf("active", "setup_incomplete")),
+		Required: []string{"hospital_id", "to"}})
 	Register("hospital.activated", Schema{Fields: fields("via", OneOf("cli"), "from", OneOf("setup_incomplete")),
 		Required: []string{"via", "from"}})
 	Register("user.created", Schema{Fields: fields("via", OneOf("cli")), Required: []string{"via"}})
