@@ -263,7 +263,7 @@ func (d Deps) denyAfterCommit(r *http.Request, revoked map[string][]string) {
 	}
 	// After commit, whatever the caller does: the revocation has happened.
 	if err := d.Auth.DenySessions(context.WithoutCancel(r.Context()), revoked); err != nil {
-		d.log().Error("platform: team write: denylist write failed", "request_id", httpx.RequestIDFrom(r.Context()),
+		d.log().Error("platform: denylist write after a session revocation failed", "request_id", httpx.RequestIDFrom(r.Context()),
 			"reason", "denylist_unavailable")
 	}
 }

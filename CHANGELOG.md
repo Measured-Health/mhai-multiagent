@@ -41,6 +41,34 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Deactivate and reactivate a hospital from the platform app (OpenAPI
+  1.40.0).** The platform app's Deactivate and Reactivate buttons sent
+  `POST /platform/hospitals/{id}/deactivate` and `/reactivate` and got 404.
+  Core now serves both to platform admins (auditors 403) on a two-step
+  session with a step-up code (`mfa_code` or `backup_code`, checked as the
+  other platform step-up writes), with `Idempotency-Key`, at most 10 a
+  minute per session. Deactivate takes `reason` (`contract_ended`,
+  `security_concern`, `hospital_request` or `other`) and an optional `note`
+  (trimmed, 1 to 500 characters, required for `other`, blank means none);
+  it is allowed from `active` and `setup_incomplete` (409 `conflict`
+  otherwise, 404 for an unknown id, both before a code is spent). In one
+  transaction the hospital becomes `deactivated` (version up by one), a
+  deactivation record keeps who, when, why and the status it left, every
+  open session of its staff is revoked (and put on the denylist after
+  commit, so they are signed out at once), and `hospital.deactivated`
+  `{hospital_id, reason, from, sessions_revoked}` is audited (never the
+  note); its queued questions are cancelled as before. Reactivate takes a
+  required `reason` (the note's rules), needs `deactivated` with an open
+  record, puts back the status the record left, closes and keeps the
+  record, and audits `hospital.reactivated` `{hospital_id, to}`. Both reply
+  with the hospital's page, whose `deactivation` is now `{by: {id, name},
+  at, reason, note}` while the hospital is deactivated through the platform
+  (null otherwise). The audit log shows `hospital_deactivated` and
+  `hospital_reactivated`, and the activity feed both (the deactivation with
+  its reason in words). Migration 00060 adds `hospital_deactivations` and
+  gives `mhai_platform` `UPDATE (status)` on hospitals, held by a trigger to
+  exactly these two moves, plus revoking a deactivated hospital's sessions.
+
 - **Add a hospital from the platform app.** The platform app's "Add
   hospital" form sent `POST /platform/hospitals` and got 404: only the CLI
   could make a hospital. Core now serves it to platform admins (auditors

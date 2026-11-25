@@ -37,6 +37,8 @@ const ActivityPage = 50
 var activityActions = map[string]string{
 	"hospital.created":              "hospital_added",
 	"hospital.updated":              "hospital_updated",
+	"hospital.deactivated":          "hospital_deactivated",
+	"hospital.reactivated":          "hospital_reactivated",
 	"hospital.model_policy_changed": "model_policy_changed",
 	"emr.connection_added":          "emr_connection_added",
 	"emr.connection_changed":        "emr_connection_changed",
@@ -133,6 +135,15 @@ func activityTarget(action string, payload map[string]any, label, reference, mem
 			return nil, nil
 		}
 		return nil, str(strings.Join(words, ", "))
+	case "hospital.deactivated":
+		// The reason in words, as mhai-web's sample API puts it; never the
+		// note.
+		if r, ok := payload["reason"].(string); ok {
+			if w, ok := DeactivateReasonWords[r]; ok {
+				return nil, str(w)
+			}
+		}
+		return nil, nil
 	case "hospital.model_policy_changed":
 		return s("provider"), s("previous")
 	case "emr.connection_added", "emr.connection_changed", "emr.connection_switched_on",
