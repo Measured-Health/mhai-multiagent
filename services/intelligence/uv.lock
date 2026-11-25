@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = "==3.12.*"
 resolution-markers = [
     "sys_platform == 'win32' and extra != 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128'",
@@ -31,7 +31,7 @@ dependencies = [
     { name = "safetensors" },
     { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "extra == 'group-12-intelligence-cu128'" },
     { name = "torch", version = "2.14.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'darwin' and extra == 'group-12-intelligence-cpu') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
-    { name = "torch", version = "2.14.1", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128')" },
+    { name = "torch", version = "2.14.1", source = { registry = "https://pypi.org/simple" }, marker = "(extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
     { name = "torch", version = "2.14.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform != 'darwin' and extra == 'group-12-intelligence-cpu') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/62/dd/14c28a3918ae4d3e40d87e2edcb8737731e52c57f28f0980bb780f50dad6/accelerate-1.16.0.tar.gz", hash = "sha256:43c446b9affb145220946a63fe32e14e968fcfca645d25b5f1f3fdbc375657ae", size = 424969, upload-time = "2026-11-16T21:00:38.494Z" }
@@ -193,7 +193,7 @@ dependencies = [
     { name = "packaging" },
     { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "extra == 'group-12-intelligence-cu128'" },
     { name = "torch", version = "2.14.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'darwin' and extra == 'group-12-intelligence-cpu') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
-    { name = "torch", version = "2.14.1", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128')" },
+    { name = "torch", version = "2.14.1", source = { registry = "https://pypi.org/simple" }, marker = "(extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
     { name = "torch", version = "2.14.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform != 'darwin' and extra == 'group-12-intelligence-cpu') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
 ]
 wheels = [
@@ -273,7 +273,7 @@ name = "cffi"
 version = "2.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pycparser", marker = "implementation_name != 'PyPy' or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/9e/ef/008a1939e372c06329a3fce4279c02f328488f3526744906eeec3da7ad5f/cffi-2.1.1.tar.gz", hash = "sha256:dd31f52ea1086513bb9df30f8fcee9b8918323ae067a3d5b78bc826a000712be", size = 530807, upload-time = "2026-08-03T21:21:18.939Z" }
 wheels = [
@@ -421,7 +421,7 @@ name = "cryptography"
 version = "50.0.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi", marker = "platform_python_implementation != 'PyPy' or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "cffi", marker = "platform_python_implementation != 'PyPy'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/9d/af/182eb91b0df3fe75c4d9f26fe70684569566745f6ba7e5c9c73a862c5252/cryptography-50.0.2.tar.gz", hash = "sha256:7b46165bb56eb4704e2eaaf86f3c940d19154535d9b0ca7d6d590b04060e00d5", size = 880623, upload-time = "2026-09-30T15:30:04.884Z" }
 wheels = [
@@ -474,7 +474,7 @@ resolution-markers = [
     "sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "cuda-pathfinder", marker = "(sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-12-intelligence-cu128') or (sys_platform == 'emscripten' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform == 'win32' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "cuda-pathfinder", marker = "(sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/15/d5/572ced1aecc8c8f3e617c3af58d3b1ed5378ed71531c607c960a3e48b516/cuda_bindings-12.9.9-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:88c41afe5be41acb17e57977dd534e335f86d0c96d284d71457168525f6327c0", size = 7063842, upload-time = "2026-09-23T03:20:45.94Z" },
@@ -566,43 +566,43 @@ wheels = [
 
 [package.optional-dependencies]
 cublas = [
-    { name = "nvidia-cublas", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform != 'linux' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
-    { name = "nvidia-cuda-nvrtc", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform != 'linux' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-cublas", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-cuda-nvrtc", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
 ]
 cudart = [
-    { name = "nvidia-cuda-runtime", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform != 'linux' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-cuda-runtime", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
 ]
 cufft = [
-    { name = "nvidia-cufft", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform != 'linux' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
-    { name = "nvidia-nvjitlink", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform != 'linux' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-cufft", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-nvjitlink", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
 ]
 cufile = [
-    { name = "nvidia-cufile", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform != 'linux' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-cufile", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
 ]
 cupti = [
-    { name = "nvidia-cuda-cupti", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform != 'linux' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-cuda-cupti", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
 ]
 curand = [
-    { name = "nvidia-curand", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform != 'linux' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-curand", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
 ]
 cusolver = [
-    { name = "nvidia-cublas", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform != 'linux' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
-    { name = "nvidia-cusolver", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform != 'linux' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
-    { name = "nvidia-cusparse", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform != 'linux' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
-    { name = "nvidia-nvjitlink", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform != 'linux' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-cublas", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-cusolver", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-cusparse", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-nvjitlink", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
 ]
 cusparse = [
-    { name = "nvidia-cusparse", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform != 'linux' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
-    { name = "nvidia-nvjitlink", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform != 'linux' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-cusparse", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-nvjitlink", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
 ]
 nvjitlink = [
-    { name = "nvidia-nvjitlink", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform != 'linux' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-nvjitlink", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
 ]
 nvrtc = [
-    { name = "nvidia-cuda-nvrtc", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform != 'linux' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-cuda-nvrtc", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
 ]
 nvtx = [
-    { name = "nvidia-nvtx", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'aarch64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform != 'linux' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-nvtx", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
 ]
 
 [[package]]
@@ -634,7 +634,7 @@ name = "docker"
 version = "7.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pywin32", marker = "sys_platform == 'win32' or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "pywin32", marker = "sys_platform == 'win32'" },
     { name = "requests" },
     { name = "urllib3" },
 ]
@@ -735,8 +735,8 @@ name = "gevent"
 version = "26.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi", marker = "(platform_python_implementation == 'CPython' and sys_platform == 'win32') or (platform_python_implementation != 'CPython' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform != 'win32' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
-    { name = "greenlet", marker = "platform_python_implementation == 'CPython' or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "cffi", marker = "platform_python_implementation == 'CPython' and sys_platform == 'win32'" },
+    { name = "greenlet", marker = "platform_python_implementation == 'CPython'" },
     { name = "zope-event" },
     { name = "zope-interface" },
 ]
@@ -895,8 +895,8 @@ name = "httpcore2"
 version = "2.16.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h11", marker = "sys_platform != 'emscripten' or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
-    { name = "truststore", marker = "sys_platform != 'emscripten' or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "h11" },
+    { name = "truststore" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c0/61/afa9d6b7452f9eca73f73d45324eb0bb52f098fd5e6049bf6b8263be9b4e/httpcore2-2.16.0.tar.gz", hash = "sha256:c72cd0413563b17e1cd8354677dff887466f8ec2551679759e93126534428643", size = 69886, upload-time = "2026-10-21T07:09:45.31Z" }
 wheels = [
@@ -923,11 +923,11 @@ name = "httpx2"
 version = "2.16.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "anyio", marker = "sys_platform != 'emscripten' or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
-    { name = "httpcore2", marker = "sys_platform != 'emscripten' or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
-    { name = "httpx2-jsfetch", marker = "sys_platform == 'emscripten' or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "anyio", marker = "sys_platform != 'emscripten'" },
+    { name = "httpcore2", marker = "sys_platform != 'emscripten'" },
+    { name = "httpx2-jsfetch", marker = "sys_platform == 'emscripten'" },
     { name = "idna" },
-    { name = "truststore", marker = "sys_platform != 'emscripten' or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "truststore", marker = "sys_platform != 'emscripten'" },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/43/73/5ca2cedf5e4e50423d1c258877865a6b62793633b561c58499f8aeb33b7e/httpx2-2.16.0.tar.gz", hash = "sha256:0d54c98128e8f2ff7fbbde0fca8c359e5f032edeaaaac443cdb7f31f685bcd7f", size = 103116, upload-time = "2026-10-21T07:09:46.348Z" }
@@ -952,7 +952,7 @@ dependencies = [
     { name = "click" },
     { name = "filelock" },
     { name = "fsspec" },
-    { name = "hf-xet", marker = "platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64' or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "hf-xet", marker = "platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'" },
     { name = "httpx" },
     { name = "packaging" },
     { name = "pyyaml" },
@@ -1067,6 +1067,7 @@ wheels = [
 name = "intelligence"
 version = "1.0.0"
 source = { editable = "." }
+default-groups = ["cpu", "dev"]
 dependencies = [
     { name = "accelerate" },
     { name = "anthropic" },
@@ -1101,7 +1102,7 @@ dependencies = [
     { name = "sqlalchemy" },
     { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "extra == 'group-12-intelligence-cu128'" },
     { name = "torch", version = "2.14.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'darwin' and extra == 'group-12-intelligence-cpu') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
-    { name = "torch", version = "2.14.1", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128')" },
+    { name = "torch", version = "2.14.1", source = { registry = "https://pypi.org/simple" }, marker = "(extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
     { name = "torch", version = "2.14.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform != 'darwin' and extra == 'group-12-intelligence-cpu') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
     { name = "transformers" },
     { name = "uvicorn" },
@@ -1158,7 +1159,7 @@ requires-dist = [
     { name = "psycopg-pool", specifier = ">=3.2,<4" },
     { name = "pydantic", specifier = ">=2.14.3" },
     { name = "pydantic-settings", specifier = ">=2.16.2" },
-    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "pyyaml", specifier = ">=6.0.4" },
     { name = "rank-bm25", specifier = ">=0.2" },
     { name = "requests", specifier = ">=2.28" },
     { name = "safetensors", specifier = ">=0.8.0" },
@@ -1188,7 +1189,7 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=1.5.0" },
     { name = "pytest-cov", specifier = ">=4.1" },
     { name = "pytest-socket", specifier = ">=0.8.1" },
-    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "pyyaml", specifier = ">=6.0.4" },
     { name = "ruff", specifier = ">=0.17.6" },
     { name = "testcontainers", extras = ["minio"], specifier = ">=4.15,<5" },
     { name = "zizmor", specifier = ">=1.32.0" },
@@ -1340,7 +1341,7 @@ dependencies = [
     { name = "pytest" },
     { name = "python-engineio" },
     { name = "python-socketio", extra = ["client"] },
-    { name = "pywin32", marker = "sys_platform == 'win32' or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "pywin32", marker = "sys_platform == 'win32'" },
     { name = "pyzmq" },
     { name = "requests" },
     { name = "werkzeug" },
@@ -1444,7 +1445,7 @@ version = "2.4.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "ast-serialize" },
-    { name = "librt", marker = "platform_python_implementation != 'PyPy' or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "librt", marker = "platform_python_implementation != 'PyPy'" },
     { name = "mypy-extensions" },
     { name = "pathspec" },
     { name = "typing-extensions" },
@@ -1639,7 +1640,7 @@ name = "nvidia-cudnn-cu12"
 version = "9.19.0.56"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas-cu12", marker = "(sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-12-intelligence-cu128') or (sys_platform == 'emscripten' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform == 'win32' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-cublas-cu12", marker = "(sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/09/b8/277c51962ee46fa3e5b203ac5f76107c650f781d6891e681e28e6f3e9fe6/nvidia_cudnn_cu12-9.19.0.56-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:08caaf27fe556aca82a3ee3b5aa49a77e7de0cfcb7ff4e5c29da426387a8267e", size = 656910700, upload-time = "2026-02-03T20:40:25.508Z" },
@@ -1678,7 +1679,7 @@ name = "nvidia-cufft-cu12"
 version = "11.3.3.83"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink-cu12", marker = "(sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-12-intelligence-cu128') or (sys_platform == 'emscripten' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform == 'win32' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-nvjitlink-cu12", marker = "(sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/60/bc/7771846d3a0272026c416fbb7e5f4c1f146d6d80704534d0b187dd6f4800/nvidia_cufft_cu12-11.3.3.83-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:848ef7224d6305cdb2a4df928759dca7b1201874787083b6e7550dd6765ce69a", size = 193109211, upload-time = "2025-03-07T01:44:56.873Z" },
@@ -1744,9 +1745,9 @@ name = "nvidia-cusolver-cu12"
 version = "11.7.3.90"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas-cu12", marker = "(sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-12-intelligence-cu128') or (sys_platform == 'emscripten' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform == 'win32' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
-    { name = "nvidia-cusparse-cu12", marker = "(sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-12-intelligence-cu128') or (sys_platform == 'emscripten' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform == 'win32' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
-    { name = "nvidia-nvjitlink-cu12", marker = "(sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-12-intelligence-cu128') or (sys_platform == 'emscripten' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform == 'win32' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-cublas-cu12", marker = "(sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-cusparse-cu12", marker = "(sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-nvjitlink-cu12", marker = "(sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c8/32/f7cd6ce8a7690544d084ea21c26e910a97e077c9b7f07bf5de623ee19981/nvidia_cusolver_cu12-11.7.3.90-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:db9ed69dbef9715071232caa9b69c52ac7de3a95773c2db65bdba85916e4e5c0", size = 267229841, upload-time = "2025-03-07T01:46:54.356Z" },
@@ -1772,7 +1773,7 @@ name = "nvidia-cusparse-cu12"
 version = "12.5.8.93"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink-cu12", marker = "(sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-12-intelligence-cu128') or (sys_platform == 'emscripten' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (sys_platform == 'win32' and extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "nvidia-nvjitlink-cu12", marker = "(sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/bc/f7/cd777c4109681367721b00a106f491e0d0d15cfa1fd59672ce580ce42a97/nvidia_cusparse_cu12-12.5.8.93-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:9b6c161cb130be1a07a27ea6923df8141f3c295852f4b260c65f18f3e0a091dc", size = 288117129, upload-time = "2025-03-07T01:47:40.407Z" },
@@ -2054,7 +2055,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
     { name = "python-dateutil" },
-    { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32' or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/17/ca/24c6bc92aca3d366146358e47f1d374c0e1a50763ef226fc71eff20a63fb/pandas-3.1.1.tar.gz", hash = "sha256:05fed3e3b7c99b226f160e29d7d6cb7ef39638c758cbfe42b3f24ba34f04b859", size = 5936163, upload-time = "2026-11-04T15:08:01.994Z" }
 wheels = [
@@ -2092,7 +2093,7 @@ dependencies = [
     { name = "safetensors" },
     { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "extra == 'group-12-intelligence-cu128'" },
     { name = "torch", version = "2.14.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'darwin' and extra == 'group-12-intelligence-cpu') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
-    { name = "torch", version = "2.14.1", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128')" },
+    { name = "torch", version = "2.14.1", source = { registry = "https://pypi.org/simple" }, marker = "(extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
     { name = "torch", version = "2.14.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform != 'darwin' and extra == 'group-12-intelligence-cpu') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
     { name = "tqdm" },
     { name = "transformers" },
@@ -2190,7 +2191,7 @@ version = "3.3.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "typing-extensions" },
-    { name = "tzdata", marker = "sys_platform == 'win32' or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/76/26/3ea4ca5eaea1c0debcdf7ee7c1613fbe721dc27a03c461c0817ffd8a0601/psycopg-3.3.6.tar.gz", hash = "sha256:c081f2250df751a943036e42db6df4571c66cd0aabe8291a7a506512b12007d2", size = 168171, upload-time = "2026-09-18T13:22:55.152Z" }
 wheels = [
@@ -2199,7 +2200,7 @@ wheels = [
 
 [package.optional-dependencies]
 binary = [
-    { name = "psycopg-binary", marker = "implementation_name != 'pypy' or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "psycopg-binary", marker = "implementation_name != 'pypy'" },
 ]
 
 [[package]]
@@ -2336,7 +2337,7 @@ name = "pynacl"
 version = "1.6.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi", marker = "platform_python_implementation != 'PyPy' or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "cffi", marker = "platform_python_implementation != 'PyPy'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d9/9a/4019b524b03a13438637b11538c82781a5eda427394380381af8f04f467a/pynacl-1.6.2.tar.gz", hash = "sha256:018494d6d696ae03c7e656e5e74cdfd8ea1326962cc401bcf018f1ed8436811c", size = 3511692, upload-time = "2026-01-01T17:48:10.851Z" }
 wheels = [
@@ -2368,7 +2369,7 @@ name = "pytest"
 version = "9.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
     { name = "iniconfig" },
     { name = "packaging" },
     { name = "pluggy" },
@@ -2494,20 +2495,20 @@ wheels = [
 
 [[package]]
 name = "pyyaml"
-version = "6.0.3"
+version = "6.0.4"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/05/8e/961c0007c59b8dd7729d542c61a4d537767a59645b82a0b521206e1e25c2/pyyaml-6.0.3.tar.gz", hash = "sha256:d76623373421df22fb4cf8817020cbb7ef15c725b9d5e45f17e189bfc384190f", size = 130960, upload-time = "2025-09-25T21:33:16.546Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/76/b8/c0b780928e2fb1c87e9e375818c6f121da2398b071012d1747be300b83f4/pyyaml-6.0.4.tar.gz", hash = "sha256:e24bf71af8a432d7808fabff134d38dfe16d3cbb41f2873bb4b1e42422de0a1a", size = 136336, upload-time = "2026-11-20T23:37:05.977Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d1/33/422b98d2195232ca1826284a76852ad5a86fe23e31b009c9886b2d0fb8b2/pyyaml-6.0.3-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:7f047e29dcae44602496db43be01ad42fc6f1cc0d8cd6c83d342306c32270196", size = 182063, upload-time = "2025-09-25T21:32:11.445Z" },
-    { url = "https://files.pythonhosted.org/packages/89/a0/6cf41a19a1f2f3feab0e9c0b74134aa2ce6849093d5517a0c550fe37a648/pyyaml-6.0.3-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:fc09d0aa354569bc501d4e787133afc08552722d3ab34836a80547331bb5d4a0", size = 173973, upload-time = "2025-09-25T21:32:12.492Z" },
-    { url = "https://files.pythonhosted.org/packages/ed/23/7a778b6bd0b9a8039df8b1b1d80e2e2ad78aa04171592c8a5c43a56a6af4/pyyaml-6.0.3-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:9149cad251584d5fb4981be1ecde53a1ca46c891a79788c0df828d2f166bda28", size = 775116, upload-time = "2025-09-25T21:32:13.652Z" },
-    { url = "https://files.pythonhosted.org/packages/65/30/d7353c338e12baef4ecc1b09e877c1970bd3382789c159b4f89d6a70dc09/pyyaml-6.0.3-cp312-cp312-manylinux2014_s390x.manylinux_2_17_s390x.manylinux_2_28_s390x.whl", hash = "sha256:5fdec68f91a0c6739b380c83b951e2c72ac0197ace422360e6d5a959d8d97b2c", size = 844011, upload-time = "2025-09-25T21:32:15.21Z" },
-    { url = "https://files.pythonhosted.org/packages/8b/9d/b3589d3877982d4f2329302ef98a8026e7f4443c765c46cfecc8858c6b4b/pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc", size = 807870, upload-time = "2025-09-25T21:32:16.431Z" },
-    { url = "https://files.pythonhosted.org/packages/05/c0/b3be26a015601b822b97d9149ff8cb5ead58c66f981e04fedf4e762f4bd4/pyyaml-6.0.3-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:8dc52c23056b9ddd46818a57b78404882310fb473d63f17b07d5c40421e47f8e", size = 761089, upload-time = "2025-09-25T21:32:17.56Z" },
-    { url = "https://files.pythonhosted.org/packages/be/8e/98435a21d1d4b46590d5459a22d88128103f8da4c2d4cb8f14f2a96504e1/pyyaml-6.0.3-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:41715c910c881bc081f1e8872880d3c650acf13dfa8214bad49ed4cede7c34ea", size = 790181, upload-time = "2025-09-25T21:32:18.834Z" },
-    { url = "https://files.pythonhosted.org/packages/74/93/7baea19427dcfbe1e5a372d81473250b379f04b1bd3c4c5ff825e2327202/pyyaml-6.0.3-cp312-cp312-win32.whl", hash = "sha256:96b533f0e99f6579b3d4d4995707cf36df9100d67e0c8303a0c55b27b5f99bc5", size = 137658, upload-time = "2025-09-25T21:32:20.209Z" },
-    { url = "https://files.pythonhosted.org/packages/86/bf/899e81e4cce32febab4fb42bb97dcdf66bc135272882d1987881a4b519e9/pyyaml-6.0.3-cp312-cp312-win_amd64.whl", hash = "sha256:5fcd34e47f6e0b794d17de1b4ff496c00986e1c83f7ab2fb8fcfe9616ff7477b", size = 154003, upload-time = "2025-09-25T21:32:21.167Z" },
-    { url = "https://files.pythonhosted.org/packages/1a/08/67bd04656199bbb51dbed1439b7f27601dfb576fb864099c7ef0c3e55531/pyyaml-6.0.3-cp312-cp312-win_arm64.whl", hash = "sha256:64386e5e707d03a7e172c0701abfb7e10f0fb753ee1d773128192742712a98fd", size = 140344, upload-time = "2025-09-25T21:32:22.617Z" },
+    { url = "https://files.pythonhosted.org/packages/86/df/5aec8a8c65e4c11fab31b55d53029d8013e5ccfcf409c20f8175e3e267c7/pyyaml-6.0.4-cp312-cp312-macosx_10_15_x86_64.whl", hash = "sha256:1088ad740f50c13178dad16fbc2fa1f634c791d42c7009fdb390e38e5b90b788", size = 187835, upload-time = "2026-11-20T23:35:00.829Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/30/efaabf2d135d11f32cbd4752f3b7df0d592894ee3ca252bbba013a7d5891/pyyaml-6.0.4-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:4d30c2f186612bd2f9f07c08a4c96721af59cfc8da3ec7cb27dfa2834e8bb019", size = 179510, upload-time = "2026-11-20T23:35:01.826Z" },
+    { url = "https://files.pythonhosted.org/packages/af/fb/d5ff6957db5c843151ff13196277bb8e20b2d5db2e2db3e8d051038d888b/pyyaml-6.0.4-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:45e37dd647db9d67b757444c74060c064ace5fdaa08f42bf4fda3812275d423e", size = 814700, upload-time = "2026-11-20T23:35:02.923Z" },
+    { url = "https://files.pythonhosted.org/packages/c4/de/569b907a281bbc49b934bcdad881486b7a476b011cf733f936ca85a8b37d/pyyaml-6.0.4-cp312-cp312-manylinux2014_s390x.manylinux_2_17_s390x.manylinux_2_28_s390x.whl", hash = "sha256:9e7ec9dc75cadd392fd687cc9b8ccf7dd59ada0a991e0d14ae0fad9ecdba00c3", size = 879806, upload-time = "2026-11-20T23:35:04.34Z" },
+    { url = "https://files.pythonhosted.org/packages/94/80/1d27f7084b983b7cfd1fb35e65a38276d9eddfdcdabc0922bb26cf9521bc/pyyaml-6.0.4-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:93bfb2459195406a518e2f487a9bbf01df240175f31e06f5a252ac6734c7bbf0", size = 849249, upload-time = "2026-11-20T23:35:05.457Z" },
+    { url = "https://files.pythonhosted.org/packages/53/37/9b49dff68570bedf27a05ff447e9a281d75bbdfa4d08dc1ee100a844c612/pyyaml-6.0.4-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:84e97378010f3da8daf673b82d39ed638098d236a1b760d61c0c1348a642bd70", size = 799796, upload-time = "2026-11-20T23:35:06.566Z" },
+    { url = "https://files.pythonhosted.org/packages/05/bb/f7df529541b98113bea84129a78f93c3889acb08385ca25f9786823dce67/pyyaml-6.0.4-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:f5c410f9e2ffc9286279a46f2e8c107edaf3b1123510af59c828a9c15b23c9db", size = 825424, upload-time = "2026-11-20T23:35:07.783Z" },
+    { url = "https://files.pythonhosted.org/packages/44/00/fc5d40087cc55bf3d7bb5ef55cc3e6513e6946afe33a188680fe1d846eb0/pyyaml-6.0.4-cp312-cp312-win32.whl", hash = "sha256:60e9da2772e259307650e03c24f50e3bc2d9fa5ed1ba44c47582e13b0e7708d1", size = 140667, upload-time = "2026-11-20T23:35:08.846Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/95/307a6ceafbad9a08300743d19329c31726224e583e05c4fe5358522ba283/pyyaml-6.0.4-cp312-cp312-win_amd64.whl", hash = "sha256:131d11bd9b60d705a6388366d77ed67850995a4d2be85fe149785a257c17e531", size = 154452, upload-time = "2026-11-20T23:35:09.792Z" },
+    { url = "https://files.pythonhosted.org/packages/62/81/15c300b14cca818cb9ee27d8cb61cc124229d04f4f7f7bc4e3fca8e2e8d8/pyyaml-6.0.4-cp312-cp312-win_arm64.whl", hash = "sha256:69380d4bae12aab2a2c9532deff6a2841bc9fda47c333691bd2368b696301768", size = 147167, upload-time = "2026-11-20T23:35:10.763Z" },
 ]
 
 [[package]]
@@ -2515,7 +2516,7 @@ name = "pyzmq"
 version = "27.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi", marker = "implementation_name == 'pypy' or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "cffi", marker = "implementation_name == 'pypy'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e7/8d/5b3d5631c2f4b4b8862f64cd0c9eb777b5710eeb5125b4be8dd0a200a4c0/pyzmq-27.2.0.tar.gz", hash = "sha256:54d4259d1bfae24ecdb5ca79f7acc2eac6c286a02d6a0ae617797cb45f0726d3", size = 292316, upload-time = "2026-08-20T19:08:21.19Z" }
 wheels = [
@@ -2786,7 +2787,7 @@ dependencies = [
     { name = "tokenizers" },
     { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "extra == 'group-12-intelligence-cu128'" },
     { name = "torch", version = "2.14.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'darwin' and extra == 'group-12-intelligence-cpu') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
-    { name = "torch", version = "2.14.1", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128')" },
+    { name = "torch", version = "2.14.1", source = { registry = "https://pypi.org/simple" }, marker = "(extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
     { name = "torch", version = "2.14.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform != 'darwin' and extra == 'group-12-intelligence-cpu') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
     { name = "tqdm" },
     { name = "transformers" },
@@ -3056,18 +3057,18 @@ resolution-markers = [
 dependencies = [
     { name = "cuda-bindings", version = "13.4.3", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
     { name = "cuda-toolkit", version = "13.0.3.0", source = { registry = "https://pypi.org/simple" }, extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"], marker = "(sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
-    { name = "filelock", marker = "(extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128')" },
-    { name = "fsspec", marker = "(extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128')" },
-    { name = "jinja2", marker = "(extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128')" },
-    { name = "networkx", marker = "(extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128')" },
+    { name = "filelock", marker = "(extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "fsspec", marker = "(extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "jinja2", marker = "(extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "networkx", marker = "(extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
     { name = "nvidia-cudnn-cu13", marker = "(sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
     { name = "nvidia-cusparselt-cu13", marker = "(sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
     { name = "nvidia-nccl-cu13", marker = "(sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
     { name = "nvidia-nvshmem-cu13", marker = "(sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
-    { name = "setuptools", version = "84.0.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128')" },
-    { name = "sympy", marker = "(extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128')" },
+    { name = "setuptools", version = "84.0.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "sympy", marker = "(extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
     { name = "triton", version = "3.8.0", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
-    { name = "typing-extensions", marker = "(extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128') or (extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128')" },
+    { name = "typing-extensions", marker = "(extra != 'group-12-intelligence-cpu' and extra != 'group-12-intelligence-cu128') or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4b/3c/379349820e9a6e713826de3d0b88f07728541bdcabe2a3afd128871cdc4b/torch-2.14.1-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:420dbf314c180ee4b86e9bc00aee5746a7d6e5bacdd7df925af671ed393f0b2e", size = 127307099, upload-time = "2026-09-30T17:44:10.421Z" },
@@ -3107,7 +3108,7 @@ name = "tqdm"
 version = "4.70.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0d/ea/b2a5bd54b28a324dae8211928b2d730b6547500342c7e6c6dea08bd0a485/tqdm-4.70.1.tar.gz", hash = "sha256:cefd0eca11b2a37a3aee776544d4f4ae913f02688135b5556b8788dfa474afc4", size = 171846, upload-time = "2026-09-11T07:25:16.601Z" }
 wheels = [
@@ -3173,7 +3174,7 @@ version = "0.27.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "annotated-doc" },
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'group-12-intelligence-cpu' and extra == 'group-12-intelligence-cu128')" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
     { name = "rich" },
     { name = "shellingham" },
 ]
