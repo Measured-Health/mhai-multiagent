@@ -95,8 +95,15 @@ var Codes = map[string]int{
 	"already_used":  http.StatusConflict,
 	// The hospital admin's message actions (additive): no sender is
 	// configured to deliver what the action owes a person (no email
-	// provider yet), so nothing was changed.
+	// provider yet), so nothing was changed. Only for that refusal before
+	// any change; never after a commit.
 	"no_delivery": http.StatusServiceUnavailable,
+	// The same actions (and adding a hospital) when the change was
+	// committed but its message could not be handed over or delivered
+	// (for example the address has no mailbox): the change stands, so
+	// asking again would only conflict. A 4xx, so no client retries it
+	// as it would a 5xx.
+	"not_delivered": http.StatusFailedDependency,
 	// An invite's or a password reset's link that is unknown, used,
 	// replaced or expired (all alike).
 	"invalid_token": http.StatusGone,
@@ -162,6 +169,7 @@ var titles = map[string]string{
 	"gone":                  "Gone",
 	"already_used":          "Already used",
 	"no_delivery":           "Message delivery not set up",
+	"not_delivered":         "Message not delivered",
 	"invalid_token":         "Link not valid",
 	"duplicate":             "Short code in use",
 	"email_in_use":          "Email in use",
@@ -219,6 +227,7 @@ var details = map[string]string{
 	"gone":                  "This file has been downloaded or has expired.",
 	"already_used":          "This legal reference has already been resolved.",
 	"no_delivery":           "Messages can't be sent yet, so nothing was changed.",
+	"not_delivered":         "The change was saved, but its message could not be delivered.",
 	"invalid_token":         "This link has expired or has already been used.",
 	"duplicate":             "Another hospital already has that short code.",
 	"email_in_use":          "An account with that email already exists.",

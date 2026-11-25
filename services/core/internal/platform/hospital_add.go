@@ -37,7 +37,7 @@ package platform
 // back all of it. With no sender (CORE_DELIVERY unset) the route answers
 // 503 no_delivery before anything is changed. After commit the link goes
 // to the sender (the notifications service mails it); if the sender
-// refuses it, the hospital stays added and the reply is 503 no_delivery,
+// refuses it, the hospital stays added and the reply is 424 not_delivered,
 // as the hospital admin's invites answer.
 //
 // Logs carry ids and codes only: never the name, the email or the link.
@@ -301,8 +301,8 @@ func taken(ctx context.Context, tx pgx.Tx, h newHospital) error {
 // email already taken (409, before a code is spent), the session's minute
 // (429), the code (403 mfa_required with none; mfa_invalid when wrong or
 // both are sent, audited auth.mfa.failed; 429 mfa_locked, audited), then
-// the write (409 again on a race), then the link to the sender (503
-// no_delivery, the hospital kept).
+// the write (409 again on a race), then the link to the sender (424
+// not_delivered, the hospital kept).
 func (d Deps) hospitalAdd(w http.ResponseWriter, r *http.Request) {
 	p, ok := caller(w, r)
 	if !ok {
@@ -389,8 +389,8 @@ func (d Deps) hospitalAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := d.Sender.Send(context.WithoutCancel(ctx), msg); err != nil {
 		d.log().Error("platform: hospital added but the invite was not handed over", "request_id", rid,
-			"hospital_id", out.ID, "user_id", p.UserID.String(), "reason", "no_delivery")
-		httpx.Error(w, r, "no_delivery")
+			"hospital_id", out.ID, "user_id", p.UserID.String(), "reason", "not_delivered")
+		httpx.Error(w, r, "not_delivered")
 		return
 	}
 	httpx.JSON(w, http.StatusCreated, out)

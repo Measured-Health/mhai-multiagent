@@ -591,8 +591,8 @@ any text. After commit the action hands the message to the configured
 `delivery.Sender`. The only sender today is `log` (development): it logs
 the kind and ids and sends nothing. With no sender (the production
 default) each such action answers 503 `no_delivery` and changes nothing;
-a sender that fails after commit is logged and answered 503 `no_delivery`
-too (the action stands). The outbox also bounds the reminders (rate
+a sender that fails after commit is logged and answered 424
+`not_delivered` (the action stands, so asking again would only conflict). The outbox also bounds the reminders (rate
 limits) and gives the review oversight its `reminded_at`.
 
 An invite's or a reset's link carries a token of 32 random bytes; only

@@ -25,7 +25,8 @@ package hospital
 // Each runs the refusals that need no code first (person, self, status,
 // last admin, sender, rate), then the code, then everything again under
 // the hospital's staff lock, with its audit entry, in one transaction. The
-// denylist and the messages go after commit.
+// denylist and the messages go after commit; a message the sender can't
+// take is 424 not_delivered (the action stands).
 
 import (
 	"context"
@@ -161,8 +162,9 @@ func (d Deps) afterCommit(ctx context.Context, p authz.Principal, id uuid.UUID, 
 }
 
 // sendAll hands the committed messages to the sender; false means the
-// reply (503 no_delivery) is written: the action stands, the message may
-// not have gone.
+// reply (424 not_delivered) is written: the action stands, the message may
+// not have gone. Never 503 no_delivery here: that says nothing was
+// changed, and a retry of a committed action would only conflict.
 func (d Deps) sendAll(w http.ResponseWriter, r *http.Request, p authz.Principal, what string, msgs []delivery.Message) bool {
 	failed := 0
 	for _, m := range msgs {
@@ -175,7 +177,7 @@ func (d Deps) sendAll(w http.ResponseWriter, r *http.Request, p authz.Principal,
 	}
 	d.log().Error("hospital: "+what+" committed but a message was not handed over", "request_id", httpx.RequestIDFrom(r.Context()),
 		"hospital_id", p.HospitalID.String(), "user_id", p.UserID.String(), "failed", failed)
-	httpx.Error(w, r, "no_delivery")
+	httpx.Error(w, r, "not_delivered")
 	return false
 }
 

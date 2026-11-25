@@ -31,6 +31,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A saved action whose message didn't go is no longer "nothing was
+  changed" (OpenAPI 1.41.0).** When a hospital admin's action was committed
+  but the sender couldn't take its message (seen live: an invite to an
+  address with no mailbox), core answered 503 `no_delivery`, whose meaning
+  is "no sender is set up, so nothing was changed". The clinical app said
+  so, the person was in fact in the staff list, and trying again answered
+  409. Such a reply is now **424 `not_delivered`** ("Message not
+  delivered": the change was saved, its message could not be delivered),
+  a 4xx so no client retries it. It covers inviting staff, resending an
+  invite, a password reset, resetting two-step, the two-step reminder,
+  assigning a reviewer, reminding reviewers, and adding a hospital from the
+  platform app (its first admin's invite). 503 `no_delivery` is kept only
+  for no sender configured, before anything changes. The failure is still
+  logged by ids ("committed but a message was not handed over"). Version
+  1.41.0 because 1.40.0 is taken by a parallel change.
+
 - **Answer checks: the step format no longer fails every claim.** Our own model
   answers in steps ("STEP 1 - ASSESS: …"); the number rule read the step number
   as a number the claim states, so every entailed claim was flagged

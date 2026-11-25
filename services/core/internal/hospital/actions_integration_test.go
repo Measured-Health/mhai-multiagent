@@ -4,7 +4,6 @@ package hospital_test
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"slices"
 	"strings"
@@ -241,15 +240,52 @@ func TestNoSenderFailsClosed(t *testing.T) {
 	}
 }
 
-// A sender that fails after commit: the action stands, the admin is told.
+// A sender that fails after commit: every action stands and the admin is
+// told so with 424 not_delivered, never 503 no_delivery (which says
+// nothing was changed, and invites a retry that would only conflict).
 func TestSendFailureIsReported(t *testing.T) {
 	w := newWorld(t)
-	w.sendErr = errors.New("synthetic send failure")
-	if st, out := w.adm(http.MethodPost, "/hospital/staff/"+w.ben.String()+"/remind", ""); st != 503 || out["code"] != "no_delivery" {
-		t.Fatalf("%d %v", st, out)
+	tag := w.h.String()[:6]
+	st, inv, raw := w.invite(t, `{"emails": ["synth.pending-`+tag+`@h1.example.test"], "roles": ["clinician"], "mfa_code": "`+goodCode+`"}`)
+	if st != 200 || len(inv.Invited) != 1 {
+		t.Fatalf("invite %d %s", st, raw)
 	}
-	if !strings.Contains(w.logs.String(), "not handed over") {
-		t.Error("the failure isn't logged")
+	invited := inv.Invited[0]["id"].(string)
+	q := query(t, w.h, w.ada, "completed", "PASS", "")
+	c := correction(t, w.h, w.ada, q)
+	newEmail := "synth.undelivered-" + tag + "@h1.example.test"
+	w.sendErr = errSynthSend
+	for _, rq := range []struct{ name, method, path, body string }{
+		{"invite", http.MethodPost, "/hospital/staff/invites", `{"emails": ["` + newEmail + `"], "roles": ["clinician"], "mfa_code": "` + goodCode + `"}`},
+		{"resend invite", http.MethodPost, "/hospital/staff/" + invited + "/resend-invite", code},
+		{"password reset", http.MethodPost, "/hospital/staff/" + w.ben.String() + "/password-reset", code},
+		{"reset two-step", http.MethodPost, "/hospital/staff/" + w.ada.String() + "/reset-mfa", code},
+		{"two-step reminder", http.MethodPost, "/hospital/staff/" + w.ben.String() + "/remind", ""},
+		{"assign reviewer", http.MethodPost, "/hospital/corrections/" + c.String() + "/assign", `{"staff_id": "` + w.ben.String() + `"}`},
+		{"remind reviewers", http.MethodPost, "/hospital/corrections/" + c.String() + "/remind", ""},
+	} {
+		if st, out := w.adm(rq.method, rq.path, rq.body); st != http.StatusFailedDependency || out["code"] != "not_delivered" {
+			t.Errorf("%s: %d %v, want 424 not_delivered", rq.name, st, out)
+		}
+	}
+	// Every change stands.
+	if scalar(t, `SELECT count(*) FROM users WHERE email = $1 AND invited_at IS NOT NULL`, newEmail) != 1 {
+		t.Error("the invite wasn't kept")
+	}
+	if scalar(t, `SELECT count(*) FROM user_mfa WHERE user_id = $1`, w.ada) != 0 {
+		t.Error("the two-step reset wasn't kept")
+	}
+	if scalar(t, `SELECT count(*) FROM feedback_events WHERE id = $1 AND assigned_to = $2`, c, w.ben) != 1 {
+		t.Error("the assignment wasn't kept")
+	}
+	if n := strings.Count(w.logs.String(), "not handed over"); n != 7 {
+		t.Errorf("%d failures logged, want 7", n)
+	}
+	// Inviting the same address again finds the person already there.
+	w.sendErr = nil
+	if st, out, raw := w.invite(t, `{"emails": ["`+newEmail+`"], "roles": ["clinician"], "mfa_code": "`+goodCode+`"}`); st != 200 ||
+		len(out.Skipped) != 1 || out.Skipped[0].Reason != "already_staff" {
+		t.Errorf("invite again %d %s", st, raw)
 	}
 }
 

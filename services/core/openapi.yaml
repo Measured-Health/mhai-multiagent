@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.39.0"
+  version: "1.41.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -1357,10 +1357,14 @@ paths:
         is never logged or audited. Audited per person (`staff.invited`,
         with the roles). The reply is never kept for an Idempotency-Key
         replay (a retry runs again, and skips the addresses invited).
+        After commit the links go to the sender; 424 `not_delivered` (added in 1.41.0) when the change was committed
+        but the sender couldn't take its message (for example the address
+        has no mailbox): the change stands, so the client must not retry it
+        (the people invited are in the staff list; resend or remove them).
       tags: [hospital]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-step-up: true
-      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, validation_failed, not_eligible, rate_limited, no_delivery, not_ready, internal_error]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, validation_failed, not_eligible, rate_limited, no_delivery, not_delivered, not_ready, internal_error]
       parameters:
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
@@ -1379,6 +1383,7 @@ paths:
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "424": { $ref: "#/components/responses/Problem" }
         "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
@@ -1574,7 +1579,10 @@ paths:
         (404), yourself (403 `self_change`: use `POST /auth/password`), an
         account that isn't active, is still invited or signs in only
         through single sign-on (409 `conflict`), no
-        message sender (503 `no_delivery`: nothing changes), three resets
+        message sender (503 `no_delivery`: nothing changes; after commit,
+        424 `not_delivered` (added in 1.41.0) when the change was committed
+        but the sender couldn't take its message (for example the address
+        has no mailbox): the change stands, so the client must not retry it), three resets
         of this person in the last hour (429 `rate_limited`), then the
         code. Revokes and denylists every session of the person and forgets
         their trusted devices, and sends a link valid 30 minutes (a new one
@@ -1587,7 +1595,7 @@ paths:
       tags: [hospital]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-step-up: true
-      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, self_change, not_found, conflict, rate_limited, validation_failed, no_delivery, not_ready, internal_error]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, self_change, not_found, conflict, rate_limited, validation_failed, no_delivery, not_delivered, not_ready, internal_error]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
         - $ref: "#/components/parameters/ClientIP"
@@ -1609,6 +1617,7 @@ paths:
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "424": { $ref: "#/components/responses/Problem" }
         "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
@@ -1621,7 +1630,10 @@ paths:
         Hospital admins, with a fresh code in the body. Order: the person
         (404), yourself (403 `self_change`), an account that isn't active
         or has no two-step on (409 `conflict`), no message sender (503
-        `no_delivery`: nothing changes), three resets of this person in
+        `no_delivery`: nothing changes; after commit, 424 `not_delivered` (added in 1.41.0) when the change was committed
+        but the sender couldn't take its message (for example the address
+        has no mailbox): the change stands, so the client must not retry it),
+        three resets of this person in
         the last hour (429 `rate_limited`), then the code. Removes their
         two-step and backup codes, revokes and denylists every session and
         forgets their trusted devices; they set two-step up again at their
@@ -1631,7 +1643,7 @@ paths:
       tags: [hospital]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-step-up: true
-      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, self_change, not_found, conflict, rate_limited, validation_failed, no_delivery, not_ready, internal_error]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, self_change, not_found, conflict, rate_limited, validation_failed, no_delivery, not_delivered, not_ready, internal_error]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
         - $ref: "#/components/parameters/ClientIP"
@@ -1653,6 +1665,7 @@ paths:
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "424": { $ref: "#/components/responses/Problem" }
         "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
@@ -1664,13 +1677,15 @@ paths:
       description: |
         Hospital admins. No code. For an active account with the
         `mfa_not_set_up` issue (else 409 `conflict`); 503 `no_delivery`
-        with no message sender (nothing recorded); at most once a day per
+        with no message sender (nothing recorded); 424 `not_delivered` (added in 1.41.0) when the change was committed
+        but the sender couldn't take its message (for example the address
+        has no mailbox): the change stands, so the client must not retry it; at most once a day per
         person (429 `rate_limited`). The reminder is recorded as due in the
         outbox and handed to the sender. Audited (`staff.mfa_reminded`).
         Answers the person. Send an `Idempotency-Key`.
       tags: [hospital]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, rate_limited, validation_failed, no_delivery, not_ready, internal_error]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, conflict, rate_limited, validation_failed, no_delivery, not_delivered, not_ready, internal_error]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
         - $ref: "#/components/parameters/ClientIP"
@@ -1687,6 +1702,7 @@ paths:
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "424": { $ref: "#/components/responses/Problem" }
         "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
@@ -1698,7 +1714,10 @@ paths:
       description: |
         Hospital admins, with a fresh code in the body. Order: the person
         (404), one not invited (no `invited_at`, or a password already chosen: 409 `conflict`), no message sender
-        (503 `no_delivery`), five invites of this person in a day or the
+        (503 `no_delivery`: nothing changes; after commit, 424 `not_delivered` (added in 1.41.0) when the change was committed
+        but the sender couldn't take its message (for example the address
+        has no mailbox): the change stands, so the client must not retry it),
+        five invites of this person in a day or the
         hospital's 500 (429 `rate_limited`), then the code. A fresh link
         valid 3 days; the old one stops working. Audited
         (`staff.invite_resent`). Answers the person, with `link` only on a
@@ -1707,7 +1726,7 @@ paths:
       tags: [hospital]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-step-up: true
-      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, conflict, rate_limited, validation_failed, no_delivery, not_ready, internal_error]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, not_found, conflict, rate_limited, validation_failed, no_delivery, not_delivered, not_ready, internal_error]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
         - $ref: "#/components/parameters/ClientIP"
@@ -1729,6 +1748,7 @@ paths:
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "424": { $ref: "#/components/responses/Problem" }
         "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
@@ -1956,7 +1976,9 @@ paths:
         500) when none is assigned or the assignee no longer is eligible.
         404 for an unknown or another hospital's correction; 409
         `already_decided` when it is no longer waiting; 503 `no_delivery`
-        with no message sender (nothing recorded); at most once an hour per
+        with no message sender (nothing recorded); 424 `not_delivered` (added in 1.41.0) when the change was committed
+        but the sender couldn't take its message (for example the address
+        has no mailbox): the change stands, so the client must not retry it; at most once an hour per
         correction (429 `rate_limited`); 422 `no_recipients` when nobody
         can review it. Each reminder is recorded as due in the outbox and
         handed to the sender; the oversight's `reminded_at` is the last.
@@ -1964,7 +1986,7 @@ paths:
         reminded). Send an `Idempotency-Key`.
       tags: [hospital]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, already_decided, rate_limited, no_recipients, validation_failed, no_delivery, not_ready, internal_error]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, already_decided, rate_limited, no_recipients, validation_failed, no_delivery, not_delivered, not_ready, internal_error]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
         - $ref: "#/components/parameters/ClientIP"
@@ -1977,6 +1999,7 @@ paths:
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "424": { $ref: "#/components/responses/Problem" }
         "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
@@ -1993,7 +2016,10 @@ paths:
         `staff_id` is 422 `validation_failed`. 404 for an unknown or
         another hospital's correction; 409 `already_decided` when it is no
         longer waiting. Assigning someone sends them a notice: 503
-        `no_delivery` with no message sender (nothing changes). Assigning
+        `no_delivery` with no message sender (nothing changes), and
+        424 `not_delivered` (added in 1.41.0) when the change was committed
+        but the sender couldn't take its message (for example the address
+        has no mailbox): the change stands, so the client must not retry it. Assigning
         the current assignee changes and sends nothing. Any other eligible
         clinician may still decide the correction. The database holds the
         same rules (migration 00049). Audited
@@ -2001,7 +2027,7 @@ paths:
         `Idempotency-Key`.
       tags: [hospital]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, already_decided, not_eligible, validation_failed, no_delivery, not_ready, internal_error]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, not_found, already_decided, not_eligible, validation_failed, no_delivery, not_delivered, not_ready, internal_error]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
         - $ref: "#/components/parameters/ClientIP"
@@ -2023,6 +2049,7 @@ paths:
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "424": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
@@ -4231,14 +4258,15 @@ paths:
         only. Nothing is kept if any of it fails. With no message sender
         configured it is 503 `no_delivery` before anything changes; if the
         sender refuses the link after commit, the hospital stays added and
-        the reply is 503 `no_delivery`. At most 10 a minute per session
+        the reply is 424 `not_delivered` (before 1.41.0, 503 `no_delivery`):
+        the client must not retry it (a retry would answer 409). At most 10 a minute per session
         (429 `rate_limited`). The reply is the hospital's page, exactly as
         `GET /platform/hospitals/{id}` reads it, and never carries the link.
         Added in 1.39.0.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
       x-step-up: true
-      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, validation_failed, conflict, duplicate, email_in_use, rate_limited, no_delivery, not_ready, internal_error]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, mfa_invalid, mfa_locked, forbidden, not_platform, validation_failed, conflict, duplicate, email_in_use, rate_limited, no_delivery, not_delivered, not_ready, internal_error]
       parameters:
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
@@ -4258,6 +4286,7 @@ paths:
         "403": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "424": { $ref: "#/components/responses/Problem" }
         "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
@@ -6022,6 +6051,7 @@ components:
             - gone
             - already_used
             - no_delivery
+            - not_delivered
             - invalid_token
             - duplicate
             - email_in_use

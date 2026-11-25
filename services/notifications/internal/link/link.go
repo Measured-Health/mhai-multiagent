@@ -10,7 +10,7 @@
 // NT8): a stale, forged or replayed request names nobody. The link must be
 // on the app's address (NT5, checked again when rendered). The send is
 // tried 3 times within about 25 seconds; the answer is accepted or a
-// closed code, and core turns anything but accepted into 503 no_delivery.
+// closed code, and core turns anything but accepted into 424 not_delivered.
 // Per hospital, at most 30 links a minute; per person, the hourly
 // allowance (mandatory kinds: the hospital's cap doesn't hold them). Logs
 // carry the kind, ids and the outcome; never the link, the address or the

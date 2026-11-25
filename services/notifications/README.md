@@ -107,8 +107,9 @@ migration 00054).
   `CORE_APP_URL` and `CORE_NOTIFY_ENABLED=true`). An invite or a reset goes
   at once by `notify.v1.ctl.send_link` with its link in the request body
   only (`internal/notifyctl`; request/reply, never JetStream); anything but
-  `accepted` answers the admin's action with 503 `no_delivery`, as #229
-  does without a sender. Every other kind (two-step notices and
+  `accepted` answers the admin's action with 424 `not_delivered` (the
+  invite or reset stands; 503 `no_delivery` stays for no sender, nothing
+  changed). Every other kind (two-step notices and
   reminders, review assignments and reminders) is written to the outbox
   with channel `email` and delivered by PR 3's sender.
 - This service: `send_link` (hospital-bound) sends only to a user named by
@@ -209,7 +210,7 @@ migration 00054).
     (`notify.delivery_failed`): this service can't write to it, and core
     learns of a failed link only after the action's transaction has
     committed. The action's own audit row is there, core logs the failure
-    by ids, and the admin gets 503 `no_delivery` and can send again.
+    by ids, and the admin gets 424 `not_delivered` and can send again.
 12. **Dead letters go to `DEAD`, but nothing shows them yet.** Core's
     `core_dead` consumer acks and ignores them (not a job type). The
     platform's Failed jobs view reads them later (PR 8).
@@ -232,7 +233,7 @@ migration 00054).
 16. **`send_link` tries 3 times in about 25 seconds** (design: 60), so
     the admin's request answers within core's 30-second control timeout.
 17. **No `invite_delivery` on `StaffOut` yet** (§13): a link's outcome is
-    the admin's own reply (200 or 503 `no_delivery`), and invites leave no
+    the admin's own reply (200 or 424 `not_delivered`), and invites leave no
     delivery row. The staff screen's field comes with mhai-web's change.
 18. **A failed link's token isn't revoked at once.** Nobody received it;
     the admin's "send again" mints a new token and revokes the old one, as

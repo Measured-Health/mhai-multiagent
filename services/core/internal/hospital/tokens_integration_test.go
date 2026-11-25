@@ -333,7 +333,7 @@ func TestPasswordResetByAdmin(t *testing.T) {
 }
 
 // Resend without a sender fails closed; an invite whose message can't be
-// handed over is reported (the invite stands).
+// handed over is reported as 424 not_delivered (the invite stands).
 func TestInviteDeliveryFailures(t *testing.T) {
 	w := newWorld(t)
 	tag := w.h.String()[:6]
@@ -343,8 +343,12 @@ func TestInviteDeliveryFailures(t *testing.T) {
 	}
 	id := out.Invited[0]["id"].(string)
 	w.sendErr = errSynthSend
-	if st, out, _ := w.invite(t, `{"emails": ["synth.fail2-`+tag+`@h1.example.test"], "roles": ["clinician"], "mfa_code": "`+goodCode+`"}`); st != 503 || len(out.Invited) != 0 {
-		t.Errorf("send failure %d", st)
+	if st, out, raw := w.invite(t, `{"emails": ["synth.fail2-`+tag+`@h1.example.test"], "roles": ["clinician"], "mfa_code": "`+goodCode+`"}`); st != 424 ||
+		len(out.Invited) != 0 || !strings.Contains(raw, `"not_delivered"`) {
+		t.Errorf("send failure %d %s", st, raw)
+	}
+	if scalar(t, `SELECT count(*) FROM users WHERE email = $1`, "synth.fail2-"+tag+"@h1.example.test") != 1 {
+		t.Error("the invite whose message failed wasn't kept")
 	}
 	w.sendErr = nil
 	d := w.deps
