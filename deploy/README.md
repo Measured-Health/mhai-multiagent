@@ -1097,7 +1097,7 @@ again at any time; it keeps what is there.
    asked). The invite should arrive within a minute from "Measured Health"
    `<no-reply@measured-health.org>`, replies going to
    info@measured-health.org, with a link on ai.measured-health.org.
-3. If the invite fails (503 `no_delivery`), or nothing arrives, read the logs (kinds, ids and codes only, never an
+3. If the invite fails (503 `no_delivery`: no sender, nothing changed; or 424 `not_delivered`: the invite was saved but its email didn't go), or nothing arrives, read the logs (kinds, ids and codes only, never an
    address, a link or the password):
 
    ```bash

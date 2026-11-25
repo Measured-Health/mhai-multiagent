@@ -621,13 +621,14 @@ func TestHospitalAddRollsBack(t *testing.T) {
 }
 
 // A sender that refuses the link: the hospital stays added (its invite
-// pending), the reply is 503 no_delivery.
+// pending), the reply is 424 not_delivered (not 503 no_delivery, which
+// says nothing was changed).
 func TestHospitalAddSendFails(t *testing.T) {
 	invites.setFailing(true)
 	defer invites.setFailing(false)
 	adm := platformAdmin(t)
 	code, email := newCode(), newEmail()
-	problem(t, "not sent", addHospital(t, mint(t, adm), coded(t, adm, addBody(t, code, email, nil))), 503, "no_delivery")
+	problem(t, "not sent", addHospital(t, mint(t, adm), coded(t, adm, addBody(t, code, email, nil))), 424, "not_delivered")
 	if n := count(t, `SELECT count(*) FROM hospitals WHERE short_code = $1 AND status = 'setup_incomplete'`, code); n != 1 {
 		t.Errorf("%d hospitals kept", n)
 	}

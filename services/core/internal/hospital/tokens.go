@@ -21,7 +21,9 @@ package hospital
 // an idempotency reply (the routes are NoStore). On development with the
 // log sender (which sends nothing) the reply carries it once, so the admin
 // can pass it on; everywhere else `link` is null. With no sender these
-// routes fail closed (503 no_delivery) before changing anything.
+// routes fail closed (503 no_delivery) before changing anything; when the
+// sender can't take a committed link the reply is 424 not_delivered (the
+// invite or reset stands).
 
 import (
 	"context"

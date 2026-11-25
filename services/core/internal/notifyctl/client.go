@@ -10,7 +10,7 @@
 // never logged; the service holds it in memory only. A refused request is
 // never answered, so it reads as a timeout here. Nothing is retried here:
 // the service retries the send itself, and a failure answers the admin's
-// action with 503 no_delivery.
+// action with 424 not_delivered (the action stands).
 package notifyctl
 
 import (
