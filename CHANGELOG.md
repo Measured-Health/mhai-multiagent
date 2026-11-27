@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Production mode and the EMR switch for the single-host backend**
+  (deploy/README.md, "Production mode" and "EMR integration";
+  docs/deploy/production-tls-emr.md). `production/enable-production.sh`:
+  a private CA, NATS with client-certificate verify, Postgres TLS-only with
+  verify-full for every client, core as production, rollback.
+  `emr/enable-emr.sh`: the emr service (staging) with its NKey, login, keys
+  and egress deny-list; the deploy publishes the emr image and keeps it
+  running. The emr and notifications services take
+  `*_NATS_TLS_CA_FILE`/`CERT_FILE`/`KEY_FILE`, required outside development.
+
 ### Changed
 
 - **One renewable backup code per account (OpenAPI 1.38.0).** Enrolment and
