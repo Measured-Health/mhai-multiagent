@@ -284,6 +284,8 @@ Alerts now carry `patient.id`, so a clinician can ask about an alert's patient. 
 - [ ] **Deploy:** merge the mhai-web PR adding `hl7v2_file` to the platform app's connector-type enum first (it reads the list strictly), then add `hl7v2_file` to `CORE_EMR_CONNECTOR_TYPES`.
 - [ ] **Clinical review:** the OBX-11 status map and the vital-sign LOINC set (`fileexport/hl7.go`) decide what can alert; they follow HL7's v2-to-FHIR map and the FHIR vital-signs profile.
 - [ ] **MLLP listener on our side: deferred, needs owner decision** (ADR 0019). Push today goes through the on-site bridge.
+- [ ] **Bridge release:** publish `ghcr.io/measured-health/mhai-hl7-bridge:<version>` from the release workflow (CI builds and checks the image; nothing publishes it yet), and give the pilot hospital the version, MHAI's egress address and the connection's public key.
+- [ ] **Bridge before go-live:** the hospital confirms in writing that the bridge host's disk is encrypted (privacy sign-off); prefer the VPN (H7) to an internet-facing SFTP port; mutual TLS on MLLP where the engine supports it.
 - [ ] **Later:** RDS^O13 / RAS^O17 (needs dispense and administration in the canonical model); ADT^A40 merges as `link_replaced_by`.
 
 ## EMR: follow-ups from PR 11 (14 Nov)

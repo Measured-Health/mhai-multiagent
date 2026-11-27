@@ -285,6 +285,14 @@ be `hl7v2_file` and gives it the file export's staleness rule.
   encounter and its ward. Other message types, test messages (MSH-11 not
   `P`), narrative or pending OBX are skipped and counted
   (`Metrics.RecordsSkipped`). `FuzzParseHL7` fuzzes the mapper.
+- **The on-site bridge** (`cmd/hl7-bridge`, `internal/hl7bridge`; design
+  §4): for hospitals whose engine can only push MLLP. It ACKs (`AA`) only
+  after the message is fsynced, answers `AE`/`AR` for malformed or
+  oversized messages, drops types the connector doesn't read, remembers
+  control ids for 7 days, spools `hl7v2_file` files and serves them over a
+  key-only SFTP server that can only list, read and move. Image
+  `services/emr/Dockerfile.hl7-bridge`; install guide `deploy/hl7-bridge/`.
+  `FuzzMLLPReader` fuzzes the framer (not in CI).
 - **To switch it on:** mhai-web with `hl7v2_file` in its connector-type
   enum first, then add `hl7v2_file` to `CORE_EMR_CONNECTOR_TYPES`.
 

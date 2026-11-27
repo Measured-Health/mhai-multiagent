@@ -66,7 +66,11 @@ func (f *Framer) Next() ([]byte, error) {
 		if b == startBlock {
 			break
 		}
-		f.Discarded++
+		// Bytes outside a frame: skipped, but no more than one frame's
+		// worth, so a stream of junk can't hold a connection forever.
+		if f.Discarded++; f.Discarded > f.max {
+			return nil, ErrFraming
+		}
 	}
 	if f.OnStart != nil {
 		f.OnStart()

@@ -52,9 +52,10 @@ func TestFramerRefuses(t *testing.T) {
 		"end without CR": {append(append([]byte{startBlock}, oru("C1")...), endBlock, 'x'), ErrFraming},
 		"cut short":      {append([]byte{startBlock}, oru("C1")...), io.ErrUnexpectedEOF},
 		"over the cap":   {Frame(bytes.Repeat([]byte("A"), 101)), ErrFrameTooLarge},
+		"junk only":      {bytes.Repeat([]byte("j"), 101), ErrFraming},
 		"end, then EOF":  {append(append([]byte{startBlock}, oru("C1")...), endBlock), io.ErrUnexpectedEOF},
 	} {
-		fr := NewFramer(bytes.NewReader(c.in), map[bool]int{true: 100, false: hl7v2.MaxMessage}[name == "over the cap"])
+		fr := NewFramer(bytes.NewReader(c.in), map[bool]int{true: 100, false: hl7v2.MaxMessage}[name == "over the cap" || name == "junk only"])
 		got, err := fr.Next()
 		if !errors.Is(err, c.want) {
 			t.Errorf("%s: %v", name, err)
