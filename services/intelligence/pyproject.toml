@@ -56,7 +56,7 @@ dependencies = [
     "jsonschema>=4.26.0",
     # The escalation guard's rule set (guardrails/rules/*.yaml), read with a safe
     # loader at start-up. Was only a transitive dependency.
-    "pyyaml>=6.0",
+    "pyyaml>=6.0.4",
     "safetensors>=0.8.0",
     "pillow>=12.3.0,<13",
     # Run sources (modelstore/sources/hf.py): base models at a pinned commit. Already
@@ -87,7 +87,7 @@ dev = [
     "testcontainers[minio]>=4.15,<5",
     "zizmor>=1.32.0",
     # test_workflows.py parses the workflow files (also a transitive dependency today).
-    "pyyaml>=6.0",
+    "pyyaml>=6.0.4",
     # The cloud tests: property tests, and no network in the unit modules.
     "hypothesis>=6.170.17",
     "pytest-socket>=0.8.1",
