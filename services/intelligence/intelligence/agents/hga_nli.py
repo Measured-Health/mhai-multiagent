@@ -138,6 +138,112 @@ def copies_format_example(claim_text: str) -> bool:
     return _norm_sentence(claim_text) in _EXAMPLE_SENTENCES
 
 
+# ── Sentence windows of a cited passage (premise = KB chunk) ──
+# The NLI model is trained on sentence pairs (MNLI-like): against a long, many-fact
+# chunk it calls even a sentence copied word for word from that chunk neutral. So a
+# claim is scored against windows of its chunk (SummaC-style): the whole chunk, each
+# sentence and each pair of adjacent sentences; the claim's entailment is the highest
+# over the windows, and a contradiction (the whole chunk's, or the claim's own
+# sentence's) vetoes support (CitationVerificationPipeline._nli_over_passage).
+NLI_MAX_WINDOWS = 24
+# A fragment shorter than this ("1.", "e.g.") is joined to the sentence after it.
+_MIN_SENTENCE_CHARS = 12
+_PREMISE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+def premise_sentences(text: str) -> List[str]:
+    """The sentences of a chunk, a too-short fragment joined to the next one."""
+    out: List[str] = []
+    carry = ""
+    for part in _PREMISE_SPLIT.split(text or ""):
+        part = part.strip()
+        if not part:
+            continue
+        part = f"{carry} {part}".strip() if carry else part
+        if len(part) < _MIN_SENTENCE_CHARS:
+            carry = part
+            continue
+        carry = ""
+        out.append(part)
+    if carry:
+        if out:
+            out[-1] = f"{out[-1]} {carry}"
+        else:
+            out.append(carry)
+    return out
+
+
+def premise_windows(text: str, max_windows: int = NLI_MAX_WINDOWS) -> List[str]:
+    """The windows of ``text`` a claim is scored against, at most ``max_windows``
+    (at least 1): the whole text first (what the model read before, so nothing it
+    found then is lost), then each sentence, then each adjacent pair. When the
+    sentences alone exceed the cap they are grouped into consecutive runs, so
+    every sentence is still in a window short enough to read; pairs fill what
+    room is left."""
+    whole = (text or "").strip()
+    max_windows = max(1, int(max_windows))
+    sents = premise_sentences(whole)
+    if len(sents) <= 1 or max_windows == 1:
+        return [whole]
+    room = max_windows - 1
+    if len(sents) > room:
+        n = len(sents)
+        cuts = [i * n // room for i in range(room + 1)]
+        singles = [" ".join(sents[a:b]) for a, b in zip(cuts, cuts[1:], strict=False)]
+        pairs: List[str] = []
+    else:
+        singles = list(sents)
+        pairs = [f"{a} {b}" for a, b in zip(sents, sents[1:], strict=False)]
+    out: List[str] = [whole]
+    seen = {whole}
+    for w in singles + pairs:
+        if len(out) >= max_windows:
+            break
+        if w not in seen:
+            seen.add(w)
+            out.append(w)
+    return out
+
+
+_CONTENT_WORD = re.compile(r"[a-z]+")
+_STOPWORDS = frozenset(
+    "a an and are as at be by for from in is it its of on or the to with".split()
+)
+
+
+def _content_words(text: str) -> set:
+    return set(_CONTENT_WORD.findall(text.lower())) - _STOPWORDS
+
+
+def aligned_windows(windows: List[str], claim: str) -> List[int]:
+    """The indexes of the claim's own sentence among ``windows`` (the first, the whole
+    passage, is never one): the windows holding the largest share of the claim's
+    content words, and of those the ones with the fewest sentences (so a sentence,
+    not the pairs it is in). Several when they tie; none when no window shares a word
+    with the claim."""
+    words = _content_words(claim)
+    if not words or len(windows) < 2:
+        return []
+    share = [len(words & _content_words(w)) / len(words) for w in windows]
+    best = max(share[1:])
+    if best <= 0:
+        return []
+    tied = [i for i in range(1, len(windows)) if share[i] == best]
+    size = {i: len(premise_sentences(windows[i])) for i in tied}
+    fewest = min(size.values())
+    return [i for i in tied if size[i] == fewest]
+
+
+def _label_prob(result: "NLIResult", name: str) -> float:
+    """The probability of ``name`` in one NLI result: the model's softmax when it is
+    there, else the confidence when it is the predicted label (the rule-based fallback
+    and test stubs give only a label and its confidence)."""
+    p = float(result.logits.get(name, 0.0) or 0.0) if result.logits else 0.0
+    if result.label.value == name:
+        p = max(p, float(result.confidence))
+    return p
+
+
 def _canonical_number(token: str) -> str:
     if "." in token:
         whole, frac = token.split(".", 1)
@@ -315,6 +421,53 @@ class NLIEntailmentVerifier:
             logits={name: probs[i].item() for i, name in self.label_map.items()},
         )
 
+    # Windows per forward pass: sorted by length, so short windows aren't padded to
+    # the whole chunk's length.
+    BATCH_SIZE = 16
+
+    def verify_pairs(self, pairs: List[Tuple[str, str]]) -> List[NLIResult]:
+        """One NLIResult per (premise, hypothesis) pair, in order: batched forward
+        passes with the model (under the lock, as verify), else the rule-based
+        fallback per pair."""
+        if not pairs:
+            return []
+        if not (self._loaded and self.model is not None):
+            return [self._verify_fallback(p, h) for p, h in pairs]
+        import torch
+
+        order = sorted(range(len(pairs)), key=lambda i: len(pairs[i][0]) + len(pairs[i][1]))
+        out: List[Optional[NLIResult]] = [None] * len(pairs)
+        with self._lock, torch.no_grad():
+            for start in range(0, len(order), self.BATCH_SIZE):
+                idx = order[start:start + self.BATCH_SIZE]
+                inputs = self.tokenizer(
+                    [pairs[i][0] for i in idx], [pairs[i][1] for i in idx],
+                    return_tensors="pt",
+                    max_length=512,
+                    truncation=True,
+                    padding=True,
+                ).to(self.device)
+                probs = torch.softmax(self.model(**inputs).logits, dim=-1).cpu()
+                for row, i in enumerate(idx):
+                    p = probs[row]
+                    pred = int(p.argmax().item())
+                    out[i] = NLIResult(
+                        premise=pairs[i][0][:100],
+                        hypothesis=pairs[i][1][:100],
+                        label=NLILabel(self.label_map[pred]),
+                        confidence=float(p[pred].item()),
+                        logits={name: float(p[k].item()) for k, name in self.label_map.items()},
+                    )
+        return [r for r in out if r is not None]
+
+    def windows_for(self, passage: str) -> List[str]:
+        """The premises a claim is checked against: the passage's windows
+        (premise_windows) with the model; the whole passage alone for the rule-based
+        fallback, as before."""
+        if not (self._loaded and self.model is not None):
+            return [passage]
+        return premise_windows(passage)
+
     def _verify_fallback(self, premise: str, hypothesis: str) -> NLIResult:
         """
         Rule-based NLI fallback when DeBERTa is unavailable.
@@ -422,8 +575,11 @@ class CitationVerificationPipeline:
       cited chunk not in the KB                 → FLAG   (not_found)
       another patient's record                  → REDACT (other_patient), no NLI
       not retrieved for this question           → REDACT (not_retrieved), no NLI
-      NLI = ENTAILMENT     (conf >= 0.7)        → PASS   (entailed)
-      NLI = CONTRADICTION  (conf >= 0.5)        → REDACT (contradicted)
+      NLI over the chunk's windows (premise_windows: the whole chunk, each
+      sentence, each adjacent pair; at most NLI_MAX_WINDOWS):
+      contradiction >= 0.5: the whole chunk's,
+        or the claim's own sentence's           → REDACT (contradicted), a veto
+      else max entailment >= 0.7 in a window    → PASS   (entailed)
       otherwise                                 → FLAG   (not_entailed)
       No citation                               → FLAG   (uncited)
     then, per claim: an entailed citation whose claim states a number that
@@ -463,6 +619,57 @@ class CitationVerificationPipeline:
             claim_index=idx,
         )
 
+    def _nli_pairs(self, pairs: List[Tuple[str, str]]) -> List[NLIResult]:
+        batch = getattr(self.nli, "verify_pairs", None)
+        if callable(batch):
+            return list(batch(pairs))
+        # A verifier with verify() only (tests): the same pairs, one by one.
+        return [self.nli.verify(premise=p, hypothesis=h) for p, h in pairs]
+
+    def _nli_over_passage(self, passage: str, hypothesis: str) -> Tuple[NLIResult, float, float]:
+        """(the result shown, entailment, contradiction) of ``hypothesis`` against
+        ``passage``, over its windows (premise_windows; the first is the whole passage).
+
+        entailment: the highest over the windows.
+        contradiction: the higher of the whole passage's (the check made before, so every
+        contradiction found then is still found) and that of the claim's own sentence
+        (aligned_windows: the sentence sharing most of the claim's words). Not the
+        highest over every window: the model calls two different facts of one source
+        contradictory ("Hypertension defined as ..." against "T2DM: fasting glucose ...";
+        the adult-dose sentence against the pediatric-dose one), which vetoed 48 of 48
+        claims copied word for word from a long chunk in scripts/hga_grounding_eval.py.
+
+        The result shown is the deciding window: the contradicting one when the
+        contradiction reaches the threshold, else the most entailing one. Its logits
+        carry the entailment, the contradiction counted, and the highest contradiction
+        of any window (contradiction_any_window), for the record."""
+        wf = getattr(self.nli, "windows_for", None)
+        windows = list(wf(passage)) if callable(wf) else premise_windows(passage)
+        results = self._nli_pairs([(w, hypothesis) for w in windows])
+        if not results or len(results) != len(windows):
+            # Nothing (or not everything) was scored: never support.
+            empty = NLIResult(premise="", hypothesis=hypothesis[:100],
+                              label=NLILabel.NEUTRAL, confidence=0.0)
+            return empty, 0.0, 0.0
+        ents = [_label_prob(r, "entailment") for r in results]
+        cons = [_label_prob(r, "contradiction") for r in results]
+        counted = [0, *aligned_windows(windows, hypothesis)]
+        decisive = max(counted, key=lambda i: cons[i])
+        entail, contra = max(ents), cons[decisive]
+        if contra >= self.contradiction_thresh:
+            best = results[decisive]
+            shown = NLIResult(best.premise, best.hypothesis, NLILabel.CONTRADICTION, contra)
+        else:
+            best = results[ents.index(entail)]
+            shown = NLIResult(best.premise, best.hypothesis, best.label, best.confidence)
+        shown.logits = dict(best.logits or {})
+        shown.logits.update({
+            "entailment": entail,
+            "contradiction": contra,
+            "contradiction_any_window": max(cons),
+        })
+        return shown, entail, contra
+
     def verify_response(
         self,
         response_text: str,
@@ -482,8 +689,9 @@ class CitationVerificationPipeline:
           2. Extract [KB#XXXX] citations from each claim
           3. Look up cited KB chunk; refuse another patient's or an
              unretrieved one
-          4. Run NLI: source chunk (premise) vs. claim without its
-             citation markers (hypothesis; strip_citation_tags)
+          4. Run NLI: the source chunk's windows (premises; premise_windows)
+             vs. the claim without its citation markers (hypothesis;
+             strip_citation_tags)
           5. Assign PASS/FLAG/REDACT, then the number rule per claim
           6. Build redacted response
         """
@@ -548,23 +756,23 @@ class CitationVerificationPipeline:
                 # Run NLI on the claim without its citation markers: the
                 # NLI model reads a marker as unsupported content. The
                 # claim shown, and the checks above, keep the original.
-                nli_result = self.nli.verify(
-                    premise=chunk.content,
-                    hypothesis=strip_answer_scaffold(strip_citation_tags(claim_text))
+                nli_result, entail, contra = self._nli_over_passage(
+                    chunk.content,
+                    strip_answer_scaffold(strip_citation_tags(claim_text)),
                 )
                 sources.append(chunk.content)
 
-                # Decision logic
-                if (nli_result.label == NLILabel.ENTAILMENT
-                    and nli_result.confidence >= self.entailment_thresh):
-                    action = VerificationAction.PASS
-                    code = "entailed"
-                    reason = "Claim entailed by source"
-                elif (nli_result.label == NLILabel.CONTRADICTION
-                      and nli_result.confidence >= self.contradiction_thresh):
+                # Decision logic, safety first: a contradiction vetoes, even when a
+                # window entails the claim; PASS only with a window that entails it
+                # and no contradiction (_nli_over_passage).
+                if contra >= self.contradiction_thresh:
                     action = VerificationAction.REDACT
                     code = "contradicted"
                     reason = f"Claim CONTRADICTS source {cid}"
+                elif entail >= self.entailment_thresh:
+                    action = VerificationAction.PASS
+                    code = "entailed"
+                    reason = "Claim entailed by source"
                 else:
                     action = VerificationAction.FLAG
                     code = "not_entailed"
