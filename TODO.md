@@ -241,7 +241,7 @@ People items:
 - [ ] **H1** (product owner with the pilot hospital): a structured source for labs, then vitals and medications (export or FHIR), its frequency, and a synthetic or de-identified layout sample. PR 11 is built to the published `mhai_csv_v1` format (14 Nov, product owner's go-ahead); H1 now confirms the pilot hospital can export it (or what a version 2 needs) and blocks real alerts for the pilot hospital.
 - [ ] **H2** (our team, with the pilot hospital's agreement): the archive's JSON "files added since" listing, a per-integration read-only key, a removed-files listing. Blocks PR 12.
 - [ ] **Ops, before egress-emr runs on a deployed host (EMR PR 4):** publish the emr image (`ghcr.io/measured-health/mhai-multiagent-emr`, not built by CI yet), write K_proxy as `secrets/emr-proxy.key` (0400, owned by 65532; `emr keys proxy-init`), and set `EGRESS_EMR_INTERNAL_CIDRS` to the `backend` network's subnet plus the host's own addresses as `/32` (egress-emr refuses to start without it). Watch the logs for `"code":"ranges_overlap"` (connections left out of egress). Owner: ops.
-- [ ] **H3** (product owner, ops): ~~choose the managed secret store~~ **chosen: OpenBao on the live host (owner, 27 Nov)**.
+- [ ] **H3** (product owner, ops): ~~choose the managed secret store~~ **chosen: OpenBao on the live host (owner, 27 Nov; not AWS)**. The steps are in [docs/deploy/emr-real-data-prerequisites.md](docs/deploy/emr-real-data-prerequisites.md).
   - Task 12 is built and rehearsed.
   - Left to do:
     - run `openbao/enable-openbao.sh` on live, with the production CA brought back once for `--prepare`;
@@ -250,7 +250,7 @@ People items:
   - Later: OpenBao on its own machine (in Nigeria if hosting moves), with auto-unseal.
 - [ ] **H4** (a named clinical lead and a second clinician): rule set v1, breaker and grouped-mode values, the paused-source wording, map review, the shadow review, names and MRNs in alerts, and the clinical reviewers for `CODEOWNERS`. Blocks Task 30, activation and live use.
 - [ ] **H5** (privacy lead and a Nigerian data protection lawyer): DPIA, processing agreement addendum, the hospital's written confirmation that its call process stays primary, NDPA basis, data location, retention values. Blocks any real data.
-- [ ] **H6** (product owner): licences for LOINC and WHO ATC/DDD. Blocks Task 21 and any real data.
+- [ ] **H6** (product owner): licences for LOINC and WHO ATC/DDD. Blocks Task 21 and any real data. **Step-by-step: [docs/deploy/emr-real-data-prerequisites.md](docs/deploy/emr-real-data-prerequisites.md).**
 - [ ] **H7** (the pilot hospital's IT): network path, SFTP host key fingerprint, rotation contact. Blocks PR 11 going live.
 - [x] **H8** (product owner): the design's §21 answers. Approved as recommended, 7 Nov.
 - [ ] **H9** (product owner, ops): an on-call owner for stale feeds, rule errors, breaker pages, link conflicts, `reconciled_late` and grouped mode. Blocks live use.
