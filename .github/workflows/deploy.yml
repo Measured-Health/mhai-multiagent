@@ -285,7 +285,7 @@ jobs:
               exit 1
             fi
 
-            before=$(cat nats/nats.conf nats/tls.conf 2>/dev/null | sha256sum)
+            before=$({ cat nats/nats.conf nats/tls.conf 2>/dev/null || true; } | sha256sum)
             hba_before=$(sha256sum postgres/pg_hba.production.conf 2>/dev/null || true)
             printf '%s' "$DEPLOY_BUNDLE" | base64 -d | tar -xzf - -C /srv/mhai-backend
             docker compose config --quiet
@@ -297,7 +297,7 @@ jobs:
             # and the config names its NKeys as variables (a new one, such as
             # NATS_BFF_PLATFORM_NKEY, would be undefined and NATS would not
             # start). `up -d core` below waits for nats to be healthy.
-            if [ "$before" != "$(cat nats/nats.conf nats/tls.conf 2>/dev/null | sha256sum)" ] && [ -n "$(docker compose ps -q nats)" ]; then
+            if [ "$before" != "$({ cat nats/nats.conf nats/tls.conf 2>/dev/null || true; } | sha256sum)" ] && [ -n "$(docker compose ps -q nats)" ]; then
               echo "nats.conf or tls.conf changed; recreating nats"
               docker compose up -d --force-recreate --no-deps nats
             fi
