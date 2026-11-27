@@ -1,6 +1,6 @@
 # Write-back to the hospital's EHR: design
 
-- **Status:** Proposed — waiting for the product owner's review. Design only, no code. **It needs owner, clinical and legal decisions (§13) before any plan.**
+- **Status:** Approved by the product owner on 27 Nov 2026 ("go with the recommendations"): every decision in §13 is the recommended option, plus the off-switch rule in §9. Not built. Before any sending: the clinical lead and legal confirm the attribution wording (Q5), legal drafts the agreement clause (Q6), and the sign-offs H-WB1 to H-WB5. Design only, no code yet.
 - **Date:** 2026-11-27
 - **Owner's ask (27 Nov):** the EMR/EHR pipeline should be "for pulling data and pushing data to the EHR systems".
 - **Companion design:** [EMR context in answers](2026-11-27-emr-context-in-answers-design.md) (the "pulling" half).
@@ -233,7 +233,7 @@ Core writes, on the hash chain, closed payloads with ids only (no text, no name,
 - **R-WB5** A compromised emr service could write to every connected EHR it holds write credentials for. Mitigated by create-only scopes, per-connection credentials and rate limits; the same blast radius as reading, now with integrity at stake.
 - **Sign-off before any live write:** product owner (H-WB1: the scope W0/W1, this design, the ADR); clinical lead (H-WB2: note type, content, attribution wording, the 24-hour limit, the PASS-only rule); legal (H-WB3: the agreement clause, the medico-legal framing, retention, regulatory position); privacy lead (H-WB4: the DPIA update); each hospital's IT (H-WB5: the write client, the bridge destination, how corrections work). These go in TODO.md.
 
-## 13. Open decisions for the owner (recommended option first; safer first)
+## 13. Decisions (product owner, 27 Nov 2026: the recommended option for each)
 
 | # | Decision | Options | Recommendation |
 |---|---|---|---|

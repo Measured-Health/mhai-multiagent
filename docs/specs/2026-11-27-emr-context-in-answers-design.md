@@ -1,6 +1,6 @@
 # EMR context in answers ("Ask MHAI about this patient"): design
 
-- **Status:** Proposed — waiting for the product owner's review. Design only, no code.
+- **Status:** Approved by the product owner on 27 Nov 2026 ("go with the recommendations"): every decision in §14 is the recommended option. Not built. Before it goes live: the clinical lead confirms the §4.1 windows and caps and the evaluation, and the sign-offs in this design. Design only, no code yet.
 - **Date:** 2026-11-27
 - **Owner's ask (27 Nov):** "Can the doctors access de-identified patient records from our platform and analyse them; add more context too, so the EMR/EHR pipeline is important not just for anomalies but for pulling data and pushing data to the EHR systems." Then: "yes draft the designs, add to todo".
 - **Companion design:** [Write-back to the hospital's EHR](2026-11-27-ehr-write-back-design.md) (the "pushing" half).
@@ -206,7 +206,7 @@ API, additive (ADR 0012): `GET /queries/{id}` gains `record: {status, facts[], o
   - the same questions with `emr_context` off, to compare.
 - **Measures:** misstated facts shown = 0; patient facts counted as support = 0; source text in prompts = 0 (a scan of every prompt in the run); clinicians' preference with and without facts on 50 paired answers; latency added (p50, p95).
 
-## 13. De-identified record access for clinicians: options for the owner (not decided)
+## 13. De-identified record access for clinicians: decided (product owner, 27 Nov: D1 now, D4 next)
 
 The owner asked whether doctors can "access de-identified patient records from our platform and analyse them".
 
@@ -225,7 +225,7 @@ The owner asked whether doctors can "access de-identified patient records from o
 
 **Recommendation for the owner to decide:** D1 now (no new risk); D4 next if clinicians want their own questions answered; D2 only after H1 is signed and with its own design; D3 only per study, with ethics and legal, and on our server. None of these feeds a clinical answer (ADR 0015 decision 4 stays: Analysis data never reaches retrieval, prompts or models).
 
-## 14. Open decisions for the owner (recommended option first; safer first)
+## 14. Decisions (product owner, 27 Nov 2026: the recommended option for each)
 
 | # | Decision | Options | Recommendation |
 |---|---|---|---|
