@@ -440,6 +440,12 @@ jobs:
             # its keys, login and files; production mode first). Anything
             # missing fails this deploy. Otherwise emr and egress-emr are
             # stopped if they run.
+            # The EMR image is pulled on every deploy, while the registry
+            # login above holds, so emr/enable-emr.sh (run later by the
+            # operator, with no registry login) finds it on the host.
+            emr_image=$(sed -n 's/^EMR_IMAGE=//p' .env | tail -n 1)
+            docker pull -q "${emr_image:-ghcr.io/measured-health/mhai-multiagent-emr:latest}" >/dev/null \
+              || echo "warning: could not pull the EMR image (emr/enable-emr.sh needs it on the host)"
             bash emr/emr.sh
 
             # The public demo only (never with SITE_MODE=live, checked

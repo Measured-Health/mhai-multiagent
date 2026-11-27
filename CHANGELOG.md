@@ -84,6 +84,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Backend deploy pulls the EMR image every time**, so
+  `emr/enable-emr.sh`, run later by the operator without a registry login,
+  finds it on the host (27 Nov: it stopped with "could not pull").
+
 - **Backend deploy: the first deploy of production mode no longer stops
   silently.** The deploy script hashed `nats/nats.conf` and `nats/tls.conf`
   before unpacking; `tls.conf` is new in that release, so `cat` failed and,
