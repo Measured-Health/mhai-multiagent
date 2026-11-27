@@ -8,6 +8,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Production mode and the EMR switch for the single-host backend**
+  (deploy/README.md, "Production mode" and "EMR integration";
+  docs/deploy/production-tls-emr.md). `production/enable-production.sh`:
+  a private CA, NATS with client-certificate verify, Postgres TLS-only with
+  verify-full for every client, core as production, rollback.
+  `emr/enable-emr.sh`: the emr service (staging) with its NKey, login, keys
+  and egress deny-list; the deploy publishes the emr image and keeps it
+  running. The emr and notifications services take
+  `*_NATS_TLS_CA_FILE`/`CERT_FILE`/`KEY_FILE`, required outside development.
+
 - **HL7 v2 message files (`hl7v2_file`, OpenAPI 1.42.0, migration 00061).**
   A new EMR connector type reads HL7 v2 ORU^R01 (results and vital signs)
   and RDE^O11 (medication orders) from batch files pulled over SFTP, on the

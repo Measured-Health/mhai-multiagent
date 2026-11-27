@@ -286,8 +286,20 @@ func TestEMRUserIsAnOptInInclude(t *testing.T) {
 	if !strings.Contains(on, "user:emr") || !strings.Contains(on, "password:$NATS_EMR_PASSWORD") {
 		t.Fatal("emr.conf must define the emr user with NATS_EMR_PASSWORD")
 	}
-	if strings.Contains(readConf(t, "deploy/nats/nats.conf"), "emr.conf") {
-		t.Fatal("the deploy config must not include an emr user yet (NATS_EMR_NKEY isn't provisioned)")
+	// The deploy config defines the emr user once, as the NKey user
+	// NATS_EMR_NKEY (deploy/emr/enable-emr.sh writes it; compose defaults it
+	// to emr-off.conf's key, whose seed was never kept), with exactly
+	// emr.conf's rights: never the include and never a password.
+	deployConf := readConf(t, "deploy/nats/nats.conf")
+	deploy := stripComments(deployConf)
+	if strings.Contains(deploy, "emr.conf") || strings.Contains(deploy, "NATS_EMR_PASSWORD") ||
+		strings.Count(deploy, "nkey:$NATS_EMR_NKEY") != 1 {
+		t.Fatal("deploy/nats/nats.conf must define the emr user once, as the NKey user NATS_EMR_NKEY")
+	}
+	devPerms := stripComments(permissionsAfter(t, readConf(t, "services/nats/emr.conf"), "user: emr"))
+	prodPerms := stripComments(permissionsAfter(t, deployConf, "nkey: $NATS_EMR_NKEY"))
+	if devPerms != prodPerms {
+		t.Fatalf("emr permissions differ:\ndev:  %s\nprod: %s", devPerms, prodPerms)
 	}
 }
 

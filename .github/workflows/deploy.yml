@@ -42,7 +42,7 @@ jobs:
        github.event.workflow_run.head_repository.full_name == github.repository)
     strategy:
       matrix:
-        image: [core, intelligence, notifications]
+        image: [core, intelligence, notifications, emr]
         arch: [amd64, arm64]
         include:
           # Core requires services/gokit, so the context is services/ (ADR 0014).
@@ -65,6 +65,13 @@ jobs:
           - image: notifications
             context: services
             file: services/notifications/Dockerfile
+          # The emr service and egress-emr (compose profile emr, deploy/README.md
+          # "EMR integration"): one image, two binaries. Published on every
+          # deploy, started on a host only when its .env has EMR_ENABLED=true.
+          # It requires services/gokit, as core.
+          - image: emr
+            context: services
+            file: services/emr/Dockerfile
           - arch: amd64
             runner: ubuntu-24.04
           - arch: arm64
@@ -134,7 +141,7 @@ jobs:
     needs: [build]
     strategy:
       matrix:
-        image: [core, intelligence, notifications]
+        image: [core, intelligence, notifications, emr]
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -225,9 +232,16 @@ jobs:
           # swap-model.sh's policy files (gpu-model/lock/): the repository's, at this commit.
           mkdir -p deploy/gpu-model/lock
           cp models/testsets.lock models/licences.json models/approved-datasets.json deploy/gpu-model/lock/
-          b=$(tar -C deploy -czf - compose.yml nats/nats.conf premigrate-check.sh live-site.sh demo/enable-demo.sh demo/reset-demo.sh \
+          # Production mode and the EMR (deploy/README.md, "Production mode",
+          # "EMR integration"): the overlays, NATS's TLS config, Postgres's
+          # client rules and the scripts, so a host in production mode always
+          # runs this commit's copies (COMPOSE_FILE in its .env names them).
+          b=$(tar -C deploy -czf - compose.yml compose.production.yml compose.emr.yml nats/nats.conf nats/tls.conf \
+            postgres/pg_hba.production.conf premigrate-check.sh live-site.sh demo/enable-demo.sh demo/reset-demo.sh \
             notifications/enable-notifications.sh gpu-model/entrypoint.sh gpu-model/gpu-model.sh \
-            gpu-model/swap-model.sh gpu-model/builder/Dockerfile gpu-model/builder/merge.py gpu-model/lock pilot/pipeline.sh | base64 -w0)
+            gpu-model/swap-model.sh gpu-model/builder/Dockerfile gpu-model/builder/merge.py gpu-model/lock pilot/pipeline.sh \
+            production/enable-production.sh production/prod-lib.sh production/check-mode.sh emr/enable-emr.sh emr/emr.sh \
+            tls/make-ca.sh tls/issue.sh tls/split-lib.sh | base64 -w0)
           echo "value=$b" >> "$GITHUB_OUTPUT"
 
       # Without a host-key check the SSH step would trust whatever answers at
@@ -271,17 +285,28 @@ jobs:
               exit 1
             fi
 
-            before=$(sha256sum nats/nats.conf 2>/dev/null || true)
+            before=$(cat nats/nats.conf nats/tls.conf 2>/dev/null | sha256sum)
+            hba_before=$(sha256sum postgres/pg_hba.production.conf 2>/dev/null || true)
             printf '%s' "$DEPLOY_BUNDLE" | base64 -d | tar -xzf - -C /srv/mhai-backend
             docker compose config --quiet
+            # Production mode (COMPOSE_FILE has compose.production.yml): the TLS
+            # files it names must be there, or nothing here restarts.
+            bash production/check-mode.sh
             # NATS reads its config at start: recreate it when the file
             # changed. A restart would keep the container's old environment,
             # and the config names its NKeys as variables (a new one, such as
             # NATS_BFF_PLATFORM_NKEY, would be undefined and NATS would not
             # start). `up -d core` below waits for nats to be healthy.
-            if [ "$before" != "$(sha256sum nats/nats.conf)" ] && [ -n "$(docker compose ps -q nats)" ]; then
-              echo "nats.conf changed; recreating nats"
+            if [ "$before" != "$(cat nats/nats.conf nats/tls.conf 2>/dev/null | sha256sum)" ] && [ -n "$(docker compose ps -q nats)" ]; then
+              echo "nats.conf or tls.conf changed; recreating nats"
               docker compose up -d --force-recreate --no-deps nats
+            fi
+            # Postgres reads its client rules at start and on reload: reload
+            # them when production mode's file changed (no restart).
+            if [ "$hba_before" != "$(sha256sum postgres/pg_hba.production.conf)" ] && [ -e production-mode ] \
+               && [ -n "$(docker compose ps -q postgres)" ]; then
+              echo "pg_hba.production.conf changed; reloading Postgres's client rules"
+              docker compose exec -T postgres psql -U pgadmin -d mhai -tAc 'SELECT pg_reload_conf()' >/dev/null
             fi
 
             # Volumes added since setup-host.sh first ran (it makes them too):
@@ -409,6 +434,13 @@ jobs:
               docker compose --profile notifications rm -f notifications mail-relay
               echo "NOTIFY_ENABLED is not true: notifications stopped."
             fi
+
+            # The EMR (profile emr; deploy/README.md, "EMR integration"): only
+            # when .env says EMR_ENABLED=true (emr/enable-emr.sh writes it, with
+            # its keys, login and files; production mode first). Anything
+            # missing fails this deploy. Otherwise emr and egress-emr are
+            # stopped if they run.
+            bash emr/emr.sh
 
             # The public demo only (never with SITE_MODE=live, checked
             # above): the seeded demo hospital and accounts, and the sample

@@ -157,10 +157,20 @@ func checkLogin(ctx context.Context, q dblogin.Querier) error {
 }
 
 // natsOptions are the connection's options: its own name and inbox, and
-// its credential (an NKey seed file, or the development password).
+// its credential (an NKey seed file, or the development password), and TLS
+// with a client certificate when the files are set.
 func natsOptions(s config.Settings) ([]nats.Option, error) {
 	opts := []nats.Option{nats.Name("notifications"), nats.CustomInboxPrefix(inboxPrefix), nats.MaxReconnects(-1),
 		nats.Timeout(5 * time.Second)}
+	// TLS with our CA only and the client certificate NATS verifies
+	// (required outside development; config.FromEnv).
+	if s.NATSTLS.Set() {
+		tc, err := s.NATSTLS.Config()
+		if err != nil {
+			return nil, errors.New("NOTIFY_NATS_TLS_*: the CA, certificate or key file is missing or not valid")
+		}
+		opts = append(opts, nats.Secure(tc))
+	}
 	if s.NATSNKeyFile != "" {
 		o, err := nats.NkeyOptionFromSeed(s.NATSNKeyFile)
 		if err != nil {

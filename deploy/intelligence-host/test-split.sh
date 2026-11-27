@@ -146,6 +146,9 @@ done
 docker exec split-pg pg_isready -h 127.0.0.1 -U pgadmin -d mhai >/dev/null || { bad "postgres starts"; exit 1; }
 
 echo "== the app host: NATS with nats/tls.conf, in the same network namespace"
+# The emr user's seedless default (compose's), read from the repository.
+EMR_OFF_PUB=$(sed -n 's/^nkey: \(U[A-Z2-7]*\)$/\1/p' "$ROOT/services/nats/emr-off.conf")
+[ -n "$EMR_OFF_PUB" ] || { bad "emr-off.conf has an NKey"; exit 1; }
 cp "$ROOT/deploy/nats/nats.conf" "$ROOT/deploy/nats/tls.conf" "$work/fill/"
 mkdir -p "$work/fill/tls"
 cp "$work/ca/ca.pem" "$work/fill/tls/ca.pem"
@@ -154,7 +157,8 @@ cp "$work/certs/nats-key.pem" "$work/fill/tls/server-key.pem"
 fill split-natsconf 1000 400
 docker run -d --name split-nats --network container:split-pg --user 1000:1000 \
   -e NATS_GATEWAY_NKEY="$GW_PUB" -e NATS_BFF_NKEY="$BFF_PUB" -e NATS_BFF_PLATFORM_NKEY="$BFF_PLATFORM_PUB" \
-  -e NATS_PIPELINE_NKEY="$PIPE_PUB" -e NATS_NOTIFICATIONS_NKEY=UANAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABKPD -v split-natsconf:/etc/nats:ro --tmpfs /data:uid=1000 \
+  -e NATS_PIPELINE_NKEY="$PIPE_PUB" -e NATS_NOTIFICATIONS_NKEY=UANAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABKPD \
+  -e NATS_EMR_NKEY="$EMR_OFF_PUB" -v split-natsconf:/etc/nats:ro --tmpfs /data:uid=1000 \
   "$NATS_IMAGE" "${NATS_CMD[@]}" >/dev/null
 for _ in $(seq 1 30); do docker logs split-nats 2>&1 | grep 'Server is ready' >/dev/null && break; sleep 1; done
 docker logs split-nats 2>&1 | grep 'Server is ready' >/dev/null || { bad "nats starts with tls.conf"; exit 1; }

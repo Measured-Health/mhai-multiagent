@@ -181,6 +181,15 @@ func serve(getenv func(string) string) error {
 	} else {
 		opts = append(opts, nats.UserInfo(natsUser, s.NATSPassword))
 	}
+	// TLS with our CA only and the client certificate NATS verifies
+	// (required outside development; config.FromEnv).
+	if s.NATSTLS.Set() {
+		tc, err := s.NATSTLS.Config()
+		if err != nil {
+			return errors.New("EMR_NATS_TLS_*: the CA, certificate or key file is missing or not valid")
+		}
+		opts = append(opts, nats.Secure(tc))
+	}
 	nc, err := nats.Connect(s.NATSURL, opts...)
 	if err != nil {
 		return errors.New("emr: cannot connect to NATS")

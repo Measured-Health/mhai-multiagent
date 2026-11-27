@@ -1575,6 +1575,130 @@ first model.
 CI. Not yet run on the GPU server: the builder image, the merge and the
 shadow on the L4.
 
+## Production mode (TLS for NATS and Postgres)
+
+The live host's backend runs as development until this is done: NATS and
+Postgres without TLS, core `CORE_ENV=development`. Production mode turns on
+TLS for every link on the host, with our own private CA, and runs core,
+the pipeline and notifications by their production rules. Design and threat
+model: [docs/deploy/production-tls-emr.md](../docs/deploy/production-tls-emr.md).
+**Do it before the EMR** (next section): the emr service speaks TLS only.
+
+| File | What it is |
+|---|---|
+| `production/enable-production.sh` | `--check`, `--prepare`, the switch, `--rollback`, `--renew` |
+| `compose.production.yml` | the overlay (`COMPOSE_FILE=compose.yml:compose.production.yml` in `.env`): `nats/tls.conf`, Postgres `ssl=on` with `postgres/pg_hba.production.conf`, `verify-full` and NATS client certificates for every client, core production |
+| `production/check-mode.sh` | run by every deploy: in production mode, the TLS files are there, verify and haven't expired (warns at 30 days) |
+| `tls/<service>/`, `tls/public/`, `secrets/bff/tls/` | the keys (0400, Postgres 0600, owned by each service's uid) and certificates; public copies in `tls/public` |
+
+mhai-web needs its NATS TLS overrides (`compose.nats-tls.yml`,
+`compose.platform.nats-tls.yml`) on the host first: its deploy ships them,
+and uses them whenever `/srv/mhai-backend/production-mode` exists.
+
+### Run-book (on the host, as `ubuntu`)
+
+Order: merge and deploy this repository's release (it publishes the emr image
+and ships the scripts), merge and deploy mhai-web's release with the
+overrides, take a backup, then:
+
+```bash
+cd /srv/mhai-backend
+sudo systemctl start mhai-backup.service          # or: docker compose exec postgres pg_dump -U pgadmin mhai > ~/pre-tls.sql
+bash production/enable-production.sh --check      # writes nothing; exit 1 lists what would refuse
+bash production/enable-production.sh --prepare    # CA in ~/mhai-ca, every certificate, files, images; nothing restarts
+# in the maintenance window:
+bash production/enable-production.sh              # the switch: one restart sequence, then the checks
+```
+
+The switch restarts Postgres and NATS, core (with its migrations), the
+pipeline, notifications and the two BFFs, then prints every NATS client with
+its TLS version and every Postgres session with its TLS flag. **Downtime:
+about 13 s for core and 20 to 25 s until the BFFs are back** (rehearsal,
+27 Nov: core readyz down 12.0 s, the clinical BFF 20.1 s, the platform BFF
+22.2 s). A failure during the switch rolls back by itself (rehearsed: back in
+17.5 s).
+
+Checks after it (the script runs the first two):
+
+```bash
+docker compose exec -T nats wget -qO- 'http://127.0.0.1:8222/connz?auth=1' | jq -r '.connections[] | "\(.name) \(.tls_version)"'
+docker compose exec -T postgres psql -U pgadmin -d mhai -tAc "select usename, ssl from pg_stat_activity join pg_stat_ssl using (pid) where client_addr is not null"
+docker compose logs --no-log-prefix core | grep '"core listening"'   # "env":"production","api_docs":false
+curl -s https://ai.measured-health.org/api/health                     # {"status":"ok"}
+```
+
+Then sign in to the clinical app and the platform app, and ask a question.
+
+**Rollback:** `bash production/enable-production.sh --rollback` (the EMR is
+switched off first; the certificates stay for the next try).
+
+### The private CA
+
+`--prepare` makes it in `~/mhai-ca` (`--ca-dir` to choose) if there is none:
+`ca-key.pem` (0600) and `ca.pem`. After issuing, **move the folder off the
+host** (an encrypted, offline copy: the owner's password manager or an
+encrypted USB key) and remove it: `shred -u ~/mhai-ca/ca-key.pem && rm -r ~/mhai-ca`.
+The scripts warn while it is still there. Bring it back only to renew or to
+issue again.
+
+### Production mode: renewal
+
+Certificates last 365 days; the deploy warns 30 days before. With the CA back
+on the host for the run:
+
+```bash
+bash production/enable-production.sh --renew --ca-dir ~/mhai-ca   # issues every certificate again, then the same switch
+```
+
+A leaked key: renew everything from a **new** CA (a new `--ca-dir` with
+`--renew`) and rotate that service's NKey. There is no revocation list.
+
+## EMR integration
+
+The emr service (ADR 0014) and its proxy egress-emr, on this host (profile
+`emr`), after production mode. Design and threat model:
+[docs/deploy/production-tls-emr.md](../docs/deploy/production-tls-emr.md).
+
+| File | What it is |
+|---|---|
+| `emr/enable-emr.sh` | `--check`, the switch, `--disable`; `--connector-types`, `--internal-cidrs` |
+| `emr/emr.sh` | run by every deploy after core is healthy: starts emr and egress-emr with `EMR_ENABLED=true`, stops them otherwise |
+| `compose.emr.yml` | core's EMR settings (`COMPOSE_FILE=...:compose.production.yml:compose.emr.yml`) |
+| `secrets/nats-emr.nk`, `secrets/emr-proxy.key`, `secrets/core-idempotency-hmac.key` | 0400, uid 65532 |
+| `emr/seal/` (sealing pair), `emr/store/` (the file secret store) | 0700, uid 65532; `secrets/emr-seal.pub` is the public half core reads |
+
+The emr service runs as **staging**: the file secret store is the only one
+built and production refuses it (H3); staging keeps every other production
+rule (TLS, verify-full, NKey only, system roots, no stub, no synthetic
+tables).
+
+```bash
+cd /srv/mhai-backend
+bash emr/enable-emr.sh --check
+bash emr/enable-emr.sh                                    # fhir_r4,file_export
+# HL7 v2 message files too (ADR 0019; off until listed):
+bash emr/enable-emr.sh --connector-types fhir_r4,file_export,hl7v2_file
+```
+
+Downtime: on the first run NATS is recreated (the emr user's new key) and
+core restarts: expect up to about 15 s. A re-run keeps the key and restarts
+core only (rehearsal: core back in 3.2 s, emr serving at 10.7 s). Check: the platform app's Records connections offers the types;
+`docker compose --profile emr logs --no-log-prefix emr | grep 'emr serving'`
+shows `"env":"staging","secret_store":true,"egress":true`. **Off:**
+`bash emr/enable-emr.sh --disable` (keys, stored credentials and the login
+stay).
+
+`EGRESS_EMR_INTERNAL_CIDRS` is every Docker network on the host and the
+host's own addresses at the time of the run: run `enable-emr.sh` again after
+another stack adds a network.
+
+### EMR integration: what is not on
+
+The code tables are synthetic until H6 and load in development only, so in
+staging the normaliser and the scheduler don't start: connections can be
+added, given credentials and tested, but nothing is polled. The rule sets
+stay off (shadow) until the clinical sign-off.
+
 ## Intelligence on its own server (split mode, off by default)
 
 The pipeline worker, the llama sidecar, `model-fetch` and the egress proxy can
@@ -1600,7 +1724,8 @@ CI's boundary-smoke job).
 
 ## Known limits
 
-- **No TLS inside the demo instance.** Postgres (`sslmode=disable`) and NATS
+- **No TLS inside the demo instance** until production mode is on
+  ("Production mode" above). Without it Postgres (`sslmode=disable`) and NATS
   run without TLS, on Docker networks and loopback only. The pilot pipeline
   runs on this host with `INTELLIGENCE_SINGLE_HOST=on`, which the worker
   accepts only for the Docker service names `nats` and `postgres`. A worker

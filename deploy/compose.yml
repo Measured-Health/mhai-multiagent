@@ -20,7 +20,13 @@
 # takes up to 1600 MiB: enable-pilot.sh refuses to start it without room.
 # The demo's sample answers (profile demo, sample-ai) take up to 192 MiB.
 # Email (profile notifications, notifications and mail-relay) takes up to
-# 96 MiB; deploy/README.md, "Turn on email for the demo".
+# 96 MiB; deploy/README.md, "Turn on email for the demo". The EMR (profile
+# emr, emr and egress-emr) takes up to 320 MiB.
+#
+# Production mode (deploy/production/enable-production.sh) adds
+# compose.production.yml through COMPOSE_FILE in .env: TLS for NATS and
+# Postgres, core as production. The EMR adds compose.emr.yml the same way
+# (deploy/emr/enable-emr.sh).
 
 name: mhai-backend
 
@@ -97,6 +103,10 @@ services:
       # sleeve" key of services/nats/notifications-off.conf: no seed exists
       # for it, so the user is there from the start and no one can sign in.
       NATS_NOTIFICATIONS_NKEY: ${NATS_NOTIFICATIONS_NKEY:-UANAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABKPD}
+      # The emr service's public key (deploy/emr/enable-emr.sh writes it). The
+      # default is services/nats/emr-off.conf's key, whose seed was never
+      # kept: the user is there from the start and no one can sign in as it.
+      NATS_EMR_NKEY: ${NATS_EMR_NKEY:-UAEV5RWVELI3WEITFTWOF7WXDBONZP4YB5NR5KS2IHRE2MBLRID4XPIV}
       GOMEMLIMIT: 96MiB
     volumes:
       - ./nats/nats.conf:/etc/nats/nats.conf:ro
@@ -148,6 +158,9 @@ services:
       # mhai_notify_app only, 00052): made only when set
       # (deploy/notifications/enable-notifications.sh).
       NOTIFY_DB_PASSWORD: ${NOTIFY_DB_PASSWORD:-}
+      # The emr service's login (emr_app, a member of mhai_emr_app only,
+      # 00020): made only when set (deploy/emr/enable-emr.sh).
+      EMR_DB_PASSWORD: ${EMR_DB_PASSWORD:-}
     mem_limit: 128m
     networks: [backend]
     depends_on:
@@ -752,36 +765,83 @@ services:
     healthcheck:
       disable: true
 
-  # The EMR integration (ADR 0014; EMR design §6.4). Off on the demo: the
-  # demo has neither the emr NATS user nor its database login yet
-  # (services/emr/README.md), so the emr service below stays commented
-  # until it does. When it runs it is on backend (internal: Postgres,
-  # NATS) and emr-proxy (internal: egress-emr only), with no route out;
-  # it needs, as the pipeline above does, its own NATS NKey and database
-  # login, the trusted keys read-only, and no env_file.
-  # emr:
-  #   image: ${EMR_IMAGE:-ghcr.io/measured-health/mhai-multiagent-emr:latest}
-  #   profiles: ["emr"]
-  #   command: ["serve"]
-  #   environment:
-  #     APP_ENV: staging
-  #     EMR_NATS_URL: tls://nats:4222
-  #     EMR_NATS_NKEY_FILE: /run/secrets/nats-emr.nk
-  #     EMR_DATABASE_URL: postgres://emr_app@postgres:5432/mhai?sslmode=verify-full
-  #     EMR_TRUSTED_KEYS_PATH: /trusted/request-keys.json
-  #     EMR_SEAL_KEY_PATH: /emr-keys
-  #     EMR_SECRETS_DIR: /emr-secrets
-  #     EMR_RULE_SET_ACTIVE: ""
-  #     # The only way out (never HTTPS_PROXY).
-  #     EMR_PROXY_URL: http://egress-emr:3128
-  #     EMR_PROXY_KEY_PATH: /run/secrets/emr-proxy.key
-  #     EMR_EGRESS_DIR: /emr-egress
-  #   volumes:
-  #     - trustedkeys:/trusted:ro
-  #     - emr-egress-conf:/emr-egress
-  #     - ./secrets/emr-proxy.key:/run/secrets/emr-proxy.key:ro
-  #   networks: [backend, emr-proxy]
-  #   mem_limit: 256m
+  # The EMR integration (ADR 0014; EMR design §6.4; deploy/README.md, "EMR
+  # integration"). Off by default (profile emr): deploy/emr/enable-emr.sh
+  # makes everything it needs, and the deploy workflow starts it only when
+  # .env has EMR_ENABLED=true (emr/emr.sh). It needs production mode
+  # (deploy/production/enable-production.sh) first: it speaks only TLS.
+  #   - APP_ENV staging, fixed here (never development, never from .env):
+  #     production's rules for NATS (tls:// with its client certificate),
+  #     Postgres (verify-full), the connectors (system roots only, no dev
+  #     CA, no stub connector) and the code tables (synthetic ones refused),
+  #     and the one secret store that is built, the file store
+  #     (EMR_SECRETS_DIR), which production refuses until the managed store
+  #     exists (plan Task 12, H3);
+  #   - its own NATS NKey (secrets/nats-emr.nk; NATS_EMR_NKEY in nats.conf)
+  #     and its own database login emr_app (core-migrate makes it from
+  #     EMR_DB_PASSWORD), the trusted keys read-only, no env_file, nothing of
+  #     core's;
+  #   - the sealing private key (emr/seal, 0400) read-only and the file
+  #     secret store (emr/store, 0700), both owned by its uid, on the host
+  #     disk (so `docker compose down -v` never takes them);
+  #   - no route out: backend and emr-proxy are internal. Its one way out is
+  #     egress-emr, named by EMR_PROXY_URL (never HTTPS_PROXY), keyed by
+  #     K_proxy (secrets/emr-proxy.key);
+  #   - no code tables (EMR_CODES_DIR unset): only synthetic tables exist
+  #     until H6, and they load in development only. Without them the
+  #     normaliser and the scheduler don't run: connections can be saved,
+  #     given credentials and tested, but nothing is polled yet.
+  emr:
+    <<: *hardening
+    image: ${EMR_IMAGE:-ghcr.io/measured-health/mhai-multiagent-emr:latest}
+    pull_policy: missing
+    profiles: ["emr"]
+    restart: unless-stopped
+    user: "65532:65532"
+    command: ["serve"]
+    environment:
+      APP_ENV: staging
+      EMR_NATS_URL: tls://nats:4222
+      EMR_NATS_NKEY_FILE: /run/secrets/nats-emr.nk
+      EMR_NATS_TLS_CA_FILE: /run/tls/ca.pem
+      EMR_NATS_TLS_CERT_FILE: /run/tls/emr.pem
+      EMR_NATS_TLS_KEY_FILE: /run/tls/emr-key.pem
+      # pool_max_conns: a fixed share of Postgres's 40 (compose.production.yml).
+      EMR_DATABASE_URL: postgres://emr_app:${EMR_DB_PASSWORD:-}@postgres:5432/mhai?sslmode=verify-full&sslrootcert=/run/tls/ca.pem&pool_max_conns=6
+      EMR_TRUSTED_KEYS_PATH: /trusted/request-keys.json
+      EMR_SEAL_KEY_PATH: /emr-keys
+      EMR_SECRETS_DIR: /emr-secrets
+      # Empty: no rule set is active, every finding is shadow.
+      EMR_RULE_SET_ACTIVE: ""
+      # The only way out (never HTTPS_PROXY).
+      EMR_PROXY_URL: http://egress-emr:3128
+      EMR_PROXY_KEY_PATH: /run/secrets/emr-proxy.key
+      EMR_EGRESS_DIR: /emr-egress
+      GOMEMLIMIT: 192MiB
+    volumes:
+      - trustedkeys:/trusted:ro
+      - emr-egress-conf:/emr-egress
+      # Each written by enable-emr.sh, owned by uid 65532: the sealing key
+      # pair (0400 key, 0700 folder), the file store (0700), K_proxy and
+      # the NKey seed (0400), and the NATS client certificate (tls/emr).
+      - ./emr/seal:/emr-keys:ro
+      - ./emr/store:/emr-secrets
+      - ${EMR_PROXY_KEY_FILE:-./secrets/emr-proxy.key}:/run/secrets/emr-proxy.key:ro
+      - ./secrets/nats-emr.nk:/run/secrets/nats-emr.nk:ro
+      - ./tls/emr:/run/tls:ro
+    tmpfs:
+      - /tmp
+    mem_limit: 256m
+    networks: [backend, emr-proxy]
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+      core-migrate: { condition: service_completed_successfully }
+      core-request-key: { condition: service_completed_successfully }
+    # Distroless (no shell): enable-emr.sh and the deploy read its start
+    # line from the log.
+    healthcheck:
+      disable: true
 
   # egress-emr, the emr service's own CONNECT proxy (services/emr/cmd/
   # egress-emr): the only service on egress-emr, the network with a route
@@ -790,11 +850,12 @@ services:
   # K_proxy) and reaches only that connection's hosts; a name is resolved
   # once and the checked address dialled. With no fresh allow-list (written
   # by the emr service) it refuses everything. Off by default (profile
-  # emr); the demo never starts it. K_proxy is the 0400 file
-  # secrets/emr-proxy.key owned by 65532 (emr keys proxy-init writes one).
-  # EGRESS_EMR_INTERNAL_CIDRS must be set in .env: the backend network's
-  # subnet (docker network inspect mhai-backend_backend) and the host's own
-  # addresses (its VPC address, /32), never reached even when declared. It
+  # emr; deploy/emr/enable-emr.sh). K_proxy is the 0400 file
+  # secrets/emr-proxy.key owned by 65532 (enable-emr.sh makes it with emr
+  # keys proxy-init). EGRESS_EMR_INTERNAL_CIDRS must be set in .env
+  # (enable-emr.sh works it out): every Docker network of this project, the
+  # Docker bridge and the host's own addresses (/32), never reached even
+  # when a connection declares them. It
   # runs as production, so it refuses to start without them. The backend
   # network keeps its subnet (fixing one would recreate it under the demo).
   egress-emr:
