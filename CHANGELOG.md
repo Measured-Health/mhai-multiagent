@@ -84,6 +84,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Backend deploy: the first deploy of production mode no longer stops
+  silently.** The deploy script hashed `nats/nats.conf` and `nats/tls.conf`
+  before unpacking; `tls.conf` is new in that release, so `cat` failed and,
+  under `set -euo pipefail`, the assignment ended the script with no output
+  (27 Nov, before any change on the host). A missing file now hashes as
+  empty.
+
 - **A hospital's Activity showed every two-step sign-in twice, once as
   "Signed in without two-step".** A two-step sign-in writes
   `auth.login.succeeded` at the password step (`{mfa_required: true}`, no
