@@ -72,6 +72,9 @@ type Row struct {
 	Line    int
 	Records []connector.RawRecord
 	Reject  *Reject
+	// Skipped: read past on purpose (hl7v2_file: a message type or a
+	// result we don't read), with the reason; counted, never stored.
+	Skipped string
 }
 
 // rawKind is the raw record kind of each file kind.

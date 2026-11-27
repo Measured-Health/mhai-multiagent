@@ -279,6 +279,13 @@ Alerts now carry `patient.id`, so a clinician can ask about an alert's patient. 
 - **Who may look up:** any clinician of the hospital, or only one with a treatment relationship (an encounter on the clinician's unit)? The alert link needs none, since the alert was already routed to them.
 - **Threats:** a clinician curious about a colleague or a public figure (needs audit and review, maybe a reason field); enumeration by sequential MRNs (exact match plus rate limits); a stolen session (step-up for lookups?); another hospital's patient (RLS and the hospital from the token, as for alerts). A full threat model goes in the design before any build (`secure-design`).
 
+## EMR: HL7 v2 message files (27 Nov)
+
+- [ ] **Deploy:** merge the mhai-web PR adding `hl7v2_file` to the platform app's connector-type enum first (it reads the list strictly), then add `hl7v2_file` to `CORE_EMR_CONNECTOR_TYPES`.
+- [ ] **Clinical review:** the OBX-11 status map and the vital-sign LOINC set (`fileexport/hl7.go`) decide what can alert; they follow HL7's v2-to-FHIR map and the FHIR vital-signs profile.
+- [ ] **MLLP listener on our side: deferred, needs owner decision** (ADR 0019). Push today goes through the on-site bridge.
+- [ ] **Later:** RDS^O13 / RAS^O17 (needs dispense and administration in the canonical model); ADT^A40 merges as `link_replaced_by`.
+
 ## EMR: follow-ups from PR 11 (14 Nov)
 
 - [x] **Migration order:** 00043 (`last_file_at`, file export staleness) follows 00040-00042 (all on main); the migration-count tests list it.

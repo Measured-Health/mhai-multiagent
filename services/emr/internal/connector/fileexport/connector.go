@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"iter"
 	"os"
 	"path"
 	"regexp"
@@ -30,6 +31,7 @@ import (
 
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/connector"
 	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/egress"
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/hl7v2"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrtypes"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrurl"
 )
@@ -70,10 +72,45 @@ type Dialer func(ctx context.Context, cfg connector.Config, origin emrurl.Origin
 // Metrics are counts only.
 type Metrics struct {
 	FilesLoaded, FilesRejected, RowsRejected, Skipped atomic.Int64
+	// RecordsSkipped: messages or results a format reads past on purpose
+	// (hl7v2_file: another message type, a test message, narrative).
+	RecordsSkipped atomic.Int64
 }
 
-// FileExport is the connector.
+// format is what differs between the file formats one transport reads:
+// the type, the file names, when a file looks finished, and the parse.
+type format struct {
+	id        string
+	validate  func(cfg connector.Config) bool
+	parseName func(name string) (fileKey, bool)
+	complete  func(data []byte) bool
+	parse     func(kind string, data []byte, cfg connector.Config) iter.Seq2[Row, error]
+}
+
+// csvFormat is mhai_csv_v1 (file_export).
+var csvFormat = &format{
+	id:        ID,
+	validate:  func(cfg connector.Config) bool { return cfg.Settings["format"] == Format },
+	parseName: parseName,
+	// A file that doesn't end a row may still be being written.
+	complete: func(data []byte) bool { return len(data) == 0 || data[len(data)-1] == '\n' },
+	parse: func(kind string, data []byte, cfg connector.Config) iter.Seq2[Row, error] {
+		return ParseBytes(kind, data, cfg.Settings["mrn_namespace"])
+	},
+}
+
+// hl7Format is hl7v2_file_v1 (hl7v2_file, hl7.go).
+var hl7Format = &format{
+	id:        HL7ID,
+	validate:  validateHL7,
+	parseName: parseHL7Name,
+	complete:  hl7v2.Complete,
+	parse:     func(_ string, data []byte, cfg connector.Config) iter.Seq2[Row, error] { return ParseHL7(data, cfg) },
+}
+
+// FileExport is the connector, for one format.
 type FileExport struct {
+	fmt  *format
 	Dial Dialer
 	// Now is the clock (nil: time.Now).
 	Now func() time.Time
@@ -88,8 +125,23 @@ var (
 	_ connector.FileSource = (*FileExport)(nil)
 )
 
-// New returns the connector.
-func New(dial Dialer) *FileExport { return &FileExport{Dial: dial, Metrics: &Metrics{}} }
+// New returns the file_export connector (mhai_csv_v1).
+func New(dial Dialer) *FileExport {
+	return &FileExport{fmt: csvFormat, Dial: dial, Metrics: &Metrics{}}
+}
+
+// NewHL7 returns the hl7v2_file connector: the same transport, reading HL7
+// v2 message files (design 2026-11-27 §3).
+func NewHL7(dial Dialer) *FileExport {
+	return &FileExport{fmt: hl7Format, Dial: dial, Metrics: &Metrics{}}
+}
+
+func (c *FileExport) format() *format {
+	if c.fmt == nil {
+		return csvFormat
+	}
+	return c.fmt
+}
 
 func (c *FileExport) now() time.Time {
 	if c.Now != nil {
@@ -107,7 +159,7 @@ func (c *FileExport) metrics() *Metrics {
 
 // Type is the shared table's row.
 func (c *FileExport) Type() connector.TypeInfo {
-	t, _ := emrtypes.Lookup(ID)
+	t, _ := emrtypes.Lookup(c.format().id)
 	return t
 }
 
@@ -131,7 +183,7 @@ func (c *FileExport) Validate(cfg connector.Config) error {
 	}) {
 		return connector.ErrConfig
 	}
-	if !userShape.MatchString(s["username"]) || !validFingerprint(s["host_key_fingerprint"]) || s["format"] != Format {
+	if !userShape.MatchString(s["username"]) || !validFingerprint(s["host_key_fingerprint"]) || !c.format().validate(cfg) {
 		return connector.ErrConfig
 	}
 	if _, ok := ExpectedMinutes(cfg); !ok {
@@ -388,7 +440,7 @@ func (c *FileExport) Fetch(ctx context.Context, cfg connector.Config, creds conn
 		if e.dir || inProgress(e.name) {
 			continue
 		}
-		k, ok := parseName(e.name)
+		k, ok := c.format().parseName(e.name)
 		if !ok || !e.regular {
 			// Misnamed (or not a plain file): never read or moved, but
 			// reported, so a results file named wrongly isn't silent.
@@ -485,21 +537,26 @@ func (c *FileExport) load(ctx context.Context, sc *sftp.Client, cfg connector.Co
 	if len(data) > MaxFile {
 		return refuse()
 	}
-	// A file shorter than listed, or one that doesn't end a row, may still
+	// A file shorter than listed, or one that doesn't look finished (a CSV
+	// that doesn't end a row, an HL7 file without its trailer), may still
 	// be being written: left in place for the next run, and reported.
-	if int64(len(data)) != fi.Size() || (len(data) > 0 && data[len(data)-1] != '\n') {
+	if int64(len(data)) != fi.Size() || !c.format().complete(data) {
 		return setAside, nil
 	}
-	ns := cfg.Settings["mrn_namespace"]
+	parse := c.format().parse
 	// The whole file first: a file refused whole stores nothing.
-	for _, err := range ParseBytes(f.kind, data, ns) {
+	for _, err := range parse(f.kind, data, cfg) {
 		if err != nil {
 			return refuse()
 		}
 	}
-	for row, err := range ParseBytes(f.kind, data, ns) {
+	for row, err := range parse(f.kind, data, cfg) {
 		if err != nil {
 			return refuse() // not reached: the same bytes parsed whole above
+		}
+		if row.Skipped != "" {
+			m.RecordsSkipped.Add(1)
+			continue
 		}
 		if row.Reject != nil {
 			m.RowsRejected.Add(1)

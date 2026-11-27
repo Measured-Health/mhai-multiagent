@@ -179,6 +179,7 @@ var Schemes = map[string]string{
 	"fhir_r4":          "https",
 	"document_archive": "https",
 	"file_export":      "sftp",
+	"hl7v2_file":       "sftp",
 	"stub":             "https",
 }
 
@@ -188,6 +189,7 @@ var URLSettings = map[string][]string{
 	"fhir_r4":          {"token_url", "record_link"},
 	"document_archive": {"record_link"},
 	"file_export":      {"record_link"},
+	"hl7v2_file":       {"record_link"},
 	"stub":             {"record_link"},
 }
 
