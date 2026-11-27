@@ -30,23 +30,37 @@ Until both are in, alerts can't rely on real codes, and any real data stays bloc
 
 ## H3: the secret store
 
-Hospitals' connection credentials (FHIR keys, SFTP keys) must live in a store separate from the server's disk, readable only by the emr service. The service already talks to a store interface (`services/emr/internal/secrets/store.go`: put, get, delete by path `mhai/<env>/emr/<hospital>/<connection>/<field>`); today only the file store exists, which production refuses.
+**Chosen: OpenBao on the live host (owner, 27 Nov).** It is built (plan Task 12, PR #305) and rehearsed on the build server, and not yet run on live.
 
-The owner ruled out AWS's store (27 Nov). Options:
+- **The service:** OpenBao runs in its own locked-down container on the live host, on an internal network shared with the emr service only, with no published port. It uses TLS from our production CA, and emr's client certificate is required.
+- **Access:** one policy. The emr service may read, write and delete under `mhai/production/emr/*` only. Core has no access. The audit log is on.
+- **With it,** the emr service runs as production.
+
+**Steps on live, in order (deploy/README.md, "OpenBao (the EMR secret store)"):**
+
+1. **Us:**
+   - `bash openbao/enable-openbao.sh --check`;
+   - bring the production CA back briefly, then `--prepare --ca-dir ~/mhai-ca`;
+   - move the CA off again;
+   - `bash openbao/enable-openbao.sh`. That is about 15 s, and the EMR service is away about 6 s; nothing else restarts.
+2. **Owner: the unseal key shares.** The setup writes 5 shares (any 3 unseal) to `~/mhai-openbao-init/` on the host, and nowhere else.
+   - Move them off at once.
+   - Spread them so that no one person and no one place holds 3, never in chat or email.
+   - Then delete the folder there (`shred`).
+   - With fewer than 3 shares left, every stored credential is lost and must be entered again.
+3. **Owner: who unseals.** OpenBao starts sealed after any restart. Until it is unsealed (`bash openbao/enable-openbao.sh --unseal`, 3 shares), EMR connections fail closed; the rest of the site is unaffected.
+4. **Backups:** the nightly backup adds an encrypted OpenBao snapshot; restoring it needs 3 shares.
+
+**Later:**
+
+- OpenBao on its own small machine (in Nigeria if hosting moves there, which helps H5);
+- auto-unseal from a second OpenBao (transit) or an HSM, to remove the manual unseal.
+
+The options considered on 27 Nov:
 
 | Option | What it is | For | Against |
 |---|---|---|---|
-| **OpenBao (recommended)** | Open-source secrets server (the community fork of HashiCorp Vault, MPL-2.0), run by us | No cloud tie-in; can run in Nigeria later (helps H5's data location); per-path access rules; full audit log | We run it: someone holds the unseal keys and unseals it after a restart |
-| HashiCorp Vault | The original | Mature | Its licence (BSL) limits some commercial use; OpenBao avoids that |
-| GCP Secret Manager or Azure Key Vault | Another cloud's managed store | Fully managed | Cross-cloud: the server would hold a key file to reach it, weaker than an attached identity; data outside Nigeria |
-| Encrypted files on the server (sops and age) | Encrypted files | Simplest | Not a separate store: whoever takes the server takes the secrets; the design rules it out for production |
-
-### If OpenBao is chosen
-
-1. **Where:** best on its own small machine (in Nigeria if hosting moves there); acceptable to start in its own locked-down container on the live host, on its own network, reachable only by the emr service.
-2. **Unseal keys:** OpenBao starts sealed. The owner keeps the unseal key shares offline (with the production CA in the password manager); after any restart someone unseals it. A later step can automate this with a hardware key or a cloud KMS.
-3. **Access:** one policy, the emr service's identity may read, write and delete under `mhai/production/emr/*` only; core has none. TLS from our private CA. Audit log on.
-4. **Backups:** its storage is encrypted at rest; back it up with the database backups.
-5. **Us:** build the `openbao` backend behind the store interface (plan Task 12), with tests against a local OpenBao container; a deploy script like `enable-emr.sh` to start and configure it; switch the emr service from `staging` to `production`.
-
-**Decision needed:** confirm OpenBao (or pick another option), and where it runs to start.
+| **OpenBao (chosen)** | Open-source secrets server (the community fork of HashiCorp Vault, MPL-2.0), run by us | No cloud tie-in; can run in Nigeria later; per-path access rules; full audit log | We run it: someone holds the unseal keys and unseals it after a restart |
+| HashiCorp Vault | The original | Mature | Its licence (BSL) limits some commercial use |
+| GCP Secret Manager or Azure Key Vault | Another cloud's managed store | Fully managed | Cross-cloud key file on the server; data outside Nigeria |
+| Encrypted files on the server (sops and age) | Encrypted files | Simplest | Not a separate store; the design rules it out for production |
