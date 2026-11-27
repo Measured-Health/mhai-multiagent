@@ -132,7 +132,11 @@ Core writes, on the hash chain, closed payloads with ids only (no text, no name,
 - **Per hospital:** `record_write` setting, `off` by default, positions `off`, `copy_only` (W0), `send`. A platform admin sets it with step-up, after the hospital's written agreement is recorded (agreement reference, like the local practice onboarding record), two platform admins (one records, one approves).
 - **Per connection:** `write_enabled`, off by default, with separate write credentials.
 - **Per clinician:** `record.write`, granted by a hospital admin.
-- **The hospital agreement clause** (legal drafts, §13 Q6): the hospital instructs MHAI to send clinician-approved notes to its EHR; the hospital remains controller and the note's custodian; the approving clinician is the author and is responsible for the content; MHAI is a tool and is named in the note; the hospital names the note type and where it appears in the chart; the hospital tells us how corrections and retractions work in its system; the hospital can switch it off at any time.
+- **Turning it off is always quick (owner, 27 Nov).** Switching on is slow and two-person; switching off is one person, at once, with step-up and a reason, audited:
+  - **Hospital admins** can switch their hospital's write-back off (or down to `copy_only`) in the hospital settings, and back on again only up to the level the platform approved. They can also pause a single connection's sending and remove any clinician's `record.write`.
+  - **Platform admins** can switch any hospital, any connection, or every hospital at once (a global stop) off.
+  - Off takes effect for anything not yet sent: queued notes stay `approved, not sent` (never dropped), and are sent only after it is back on and the approver confirms again. Notes already delivered are untouched (retraction is §8).
+- **The hospital agreement clause** (legal drafts, §13 Q6): the hospital instructs MHAI to send clinician-approved notes to its EHR; the hospital remains controller and the note's custodian; the approving clinician is the author and is responsible for the content; MHAI is a tool and is named in the note; the hospital names the note type and where it appears in the chart; the hospital tells us how corrections and retractions work in its system; the hospital can switch it off at any time (its admins do it themselves in the hospital settings, see above).
 
 ## 10. Liability and medico-legal points
 
