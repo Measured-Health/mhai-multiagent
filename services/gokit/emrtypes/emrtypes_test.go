@@ -13,7 +13,7 @@ func TestTypesClosed(t *testing.T) {
 	for _, ti := range Types {
 		ids = append(ids, ti.ID)
 	}
-	if !slices.Equal(ids, []string{"fhir_r4", "document_archive", "file_export", "stub"}) {
+	if !slices.Equal(ids, []string{"fhir_r4", "document_archive", "file_export", "hl7v2_file", "stub"}) {
 		t.Fatalf("types %v", ids)
 	}
 	key := regexp.MustCompile(`^[a-z_]+$`)
@@ -40,10 +40,10 @@ func TestTypesClosed(t *testing.T) {
 	}
 	// FHIR R4 is built (EMR PR 6) and the file export (PR 11); the stub
 	// only in development.
-	if b := Built(false); !slices.Equal(b, []string{"fhir_r4", "file_export"}) {
+	if b := Built(false); !slices.Equal(b, []string{"fhir_r4", "file_export", "hl7v2_file"}) {
 		t.Fatalf("built outside development: %v", b)
 	}
-	if b := Built(true); !slices.Equal(b, []string{"fhir_r4", "file_export", "stub"}) {
+	if b := Built(true); !slices.Equal(b, []string{"fhir_r4", "file_export", "hl7v2_file", "stub"}) {
 		t.Fatalf("built in development: %v", b)
 	}
 	// The MRN namespace (design §10.2, §16.1): an optional text setting,
@@ -69,6 +69,23 @@ func TestTypesClosed(t *testing.T) {
 	}
 	if f, _ := fe.Field("mrn_namespace"); f.Required {
 		t.Fatalf("file_export mrn_namespace required")
+	}
+	// HL7 v2 message files (design 2026-11-27 §3.1): the file_export
+	// transport's fields, the time zone and facility, the MRN by type.
+	hl, _ := Lookup("hl7v2_file")
+	keys = nil
+	for _, f := range hl.Fields {
+		keys = append(keys, f.Key)
+	}
+	if !slices.Equal(keys, []string{"folder", "username", "host_key_fingerprint", "expected_every_minutes", "time_zone",
+		"sending_facility", "mrn_namespace", "mrn_identifier_type", "mrn_assigning_authority", "access_key"}) ||
+		!slices.Equal(hl.Secrets(), []string{"access_key"}) || !hl.Built() {
+		t.Fatalf("hl7v2_file fields %v", keys)
+	}
+	for _, k := range []string{"time_zone", "sending_facility", "mrn_namespace", "mrn_identifier_type", "mrn_assigning_authority"} {
+		if f, _ := hl.Field(k); f.Required {
+			t.Errorf("hl7v2_file %s required", k)
+		}
 	}
 	if _, ok := Lookup("hl7v2_feed"); ok {
 		t.Fatal("hl7v2_feed is not built and not offered")

@@ -181,6 +181,15 @@ func serve(getenv func(string) string) error {
 	} else {
 		opts = append(opts, nats.UserInfo(natsUser, s.NATSPassword))
 	}
+	// TLS with our CA only and the client certificate NATS verifies
+	// (required outside development; config.FromEnv).
+	if s.NATSTLS.Set() {
+		tc, err := s.NATSTLS.Config()
+		if err != nil {
+			return errors.New("EMR_NATS_TLS_*: the CA, certificate or key file is missing or not valid")
+		}
+		opts = append(opts, nats.Secure(tc))
+	}
 	nc, err := nats.Connect(s.NATSURL, opts...)
 	if err != nil {
 		return errors.New("emr: cannot connect to NATS")
@@ -219,13 +228,14 @@ func serve(getenv func(string) string) error {
 		return err
 	}
 	clients := func(cfg connector.Config) *http.Client { return egress.HTTPWithRoots(cfg, proxyURL, proxyKey, roots) }
-	// The SFTP client for file exports: through egress-emr only, with the
+	// The SFTP client for file exports and HL7 v2 message files: through egress-emr only, with the
 	// connection's own Proxy-Authorization and its pinned host key.
 	dial := func(ctx context.Context, cfg connector.Config, origin emrurl.Origin, fingerprint, user string,
 		auth []ssh.AuthMethod) (*ssh.Client, error) {
 		return egress.SSH(ctx, cfg, proxyURL, proxyKey, origin, fingerprint, user, auth)
 	}
-	registry := connector.NewRegistry(s.Development(), stub.New(), fhir.New(clients), fileexport.New(dial))
+	registry := connector.NewRegistry(s.Development(), stub.New(), fhir.New(clients), fileexport.New(dial),
+		fileexport.NewHL7(dial))
 
 	// The normaliser (PR 5): only with code tables and maps configured.
 	// Synthetic tables and unreviewed conversions load in development only.

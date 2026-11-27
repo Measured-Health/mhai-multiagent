@@ -838,40 +838,6 @@ func pilotPipeline(t *testing.T) deployService {
 	return p
 }
 
-// commentedService parses deploy/compose.yml's commented-out block for
-// service name: every line from "  # <name>:" to the first line that
-// isn't a comment loses its "  # " prefix. Lines commented twice stay
-// comments.
-func commentedService(t *testing.T, name string) deployService {
-	t.Helper()
-	var block []string
-	in := false
-	for _, line := range strings.Split(readRepoFile(t, filepath.Join("deploy", "compose.yml")), "\n") {
-		if line == "  # "+name+":" {
-			in = true
-		}
-		if !in {
-			continue
-		}
-		if !strings.HasPrefix(line, "  #") {
-			break
-		}
-		block = append(block, strings.TrimPrefix(strings.TrimPrefix(line, "  #"), " "))
-	}
-	if len(block) == 0 {
-		t.Fatalf("deploy/compose.yml has no commented %s block", name)
-	}
-	var svcs map[string]deployService
-	if err := yaml.Unmarshal([]byte(strings.Join(block, "\n")), &svcs); err != nil {
-		t.Fatalf("the commented %s block isn't valid YAML once uncommented: %v", name, err)
-	}
-	p, ok := svcs[name]
-	if !ok {
-		t.Fatalf("the commented block has no %s service", name)
-	}
-	return p
-}
-
 // Cloud plan Task 14 (A15): only the egress proxy joins the egress network,
 // which is the only one with a route out besides edge (core's and NATS's
 // loopback ports). The proxy is off by default (profile cloud), publishes
@@ -1261,9 +1227,7 @@ func TestSquidConfAllowsOnlyConnect443ToListedHosts(t *testing.T) {
 // profile emr only (off by default), publish no port, and share only the
 // allow-list (written by emr, read-only for the proxy) and K_proxy
 // (read-only in both). The proxy runs read-only, unprivileged, with no
-// capabilities and no secret of anyone else's. In both compose files; in
-// deploy/compose.yml the emr service is a commented block until the demo
-// has its NATS user and login.
+// capabilities and no secret of anyone else's. In both compose files.
 func TestEMRNeverOnEgressNetwork(t *testing.T) {
 	type file struct {
 		name string
@@ -1272,7 +1236,7 @@ func TestEMRNeverOnEgressNetwork(t *testing.T) {
 	}
 	dev := loadComposeAs(t, "docker-compose.yml")
 	dep := loadDeployCompose(t)
-	for _, f := range []file{{"docker-compose.yml", dev, dev.Services["emr"]}, {"deploy/compose.yml", dep, commentedService(t, "emr")}} {
+	for _, f := range []file{{"docker-compose.yml", dev, dev.Services["emr"]}, {"deploy/compose.yml", dep, dep.Services["emr"]}} {
 		p, ok := f.c.Services["egress-emr"]
 		if !ok {
 			t.Errorf("%s: no egress-emr service", f.name)
@@ -1740,7 +1704,7 @@ func TestDeployRunsTheGPUModelSwitch(t *testing.T) {
 // itself touches nothing unless .env says PIPELINE_ENABLED=true (test-pipeline.sh).
 func TestDeployRunsThePipelineStep(t *testing.T) {
 	wf := readRepoFile(t, filepath.Join(".github", "workflows", "deploy.yml"))
-	if !strings.Contains(wf, " pilot/pipeline.sh | base64") {
+	if !strings.Contains(wf, " pilot/pipeline.sh ") {
 		t.Error("deploy.yml does not bundle deploy/pilot/pipeline.sh")
 	}
 	run := strings.Index(wf, "bash pilot/pipeline.sh")

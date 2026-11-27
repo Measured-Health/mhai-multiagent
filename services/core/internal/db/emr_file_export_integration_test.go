@@ -23,14 +23,21 @@ import (
 // admins) and the platform's health, for a file export polled a minute
 // ago, as the newest file ages.
 func TestStaleByExpectedInterval(t *testing.T) {
+	// Migration 00061: hl7v2_file (HL7 v2 message files) has the same rule.
+	for _, typ := range []string{"file_export", "hl7v2_file"} {
+		t.Run(typ, func(t *testing.T) { staleByExpectedInterval(t, typ) })
+	}
+}
+
+func staleByExpectedInterval(t *testing.T, typ string) {
 	_, pool := shared(t)
 	ctx := context.Background()
 	h, _ := seedHospital(t, pool, uniqueCode("FE"))
 	c := uuid.New()
 	fhir := seedConn(t, pool, h)
 	if _, err := pool.Exec(ctx, `INSERT INTO emr_connections (id, hospital_id, type, source_label, base_url, settings,
-		credentials_origin, enabled, poll_seconds) VALUES ($1, $2, 'file_export', 'Lab export', 'sftp://sftp.synthetic-hospital.example',
-		'{"folder": "/outbound", "expected_every_minutes": "60"}', '{sftp://sftp.synthetic-hospital.example:22}', true, 300)`, c, h); err != nil {
+		credentials_origin, enabled, poll_seconds) VALUES ($1, $2, $3, 'Lab export', 'sftp://sftp.synthetic-hospital.example',
+		'{"folder": "/outbound", "expected_every_minutes": "60"}', '{sftp://sftp.synthetic-hospital.example:22}', true, 300)`, c, h, typ); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE emr_connections SET enabled = true, poll_seconds = 300 WHERE id = $1`, fhir); err != nil {
@@ -169,6 +176,49 @@ func TestMigration00043DownUp(t *testing.T) {
 	}
 	if cols != 0 || len(body) == 0 || strings.Contains(body, "file_export") {
 		t.Fatalf("after down: column %d, function names file_export %v", cols, strings.Contains(body, "file_export"))
+	}
+	if err := db.MigrateUp(ctx, pg.URL); err != nil {
+		t.Fatalf("up again: %v", err)
+	}
+}
+
+// 00061 (HL7 v2 message files) accepts hl7v2_file, and goes down to 00060
+// and up again: the type refused again, the functions as 00043 left them.
+func TestMigration00061HL7v2File(t *testing.T) {
+	pg := testutil.StartPostgres(t)
+	ctx := context.Background()
+	if err := db.MigrateUp(ctx, pg.URL); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := db.Open(ctx, pg.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	h, _ := seedHospital(t, pool, uniqueCode("HL"))
+	insert := func() error {
+		_, err := pool.Exec(ctx, `INSERT INTO emr_connections (id, hospital_id, type, source_label, base_url, settings)
+			VALUES ($1, $2, 'hl7v2_file', 'Lab messages', 'sftp://sftp.synthetic-hospital.example', '{}')`, uuid.New(), h)
+		return err
+	}
+	if err := insert(); err != nil {
+		t.Fatalf("hl7v2_file refused: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM emr_connections WHERE type = 'hl7v2_file'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MigrateDownTo(ctx, pg.URL, 60); err != nil {
+		t.Fatalf("down to 60: %v", err)
+	}
+	var body string
+	if err := pool.QueryRow(ctx, `SELECT prosrc FROM pg_proc WHERE proname = 'emr_sources_status'`).Scan(&body); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(body, "hl7v2_file") || !strings.Contains(body, "file_export") {
+		t.Fatal("after down: the function isn't 00043's")
+	}
+	if err := insert(); err == nil {
+		t.Fatal("after down: hl7v2_file accepted")
 	}
 	if err := db.MigrateUp(ctx, pg.URL); err != nil {
 		t.Fatalf("up again: %v", err)

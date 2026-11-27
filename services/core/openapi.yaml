@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.41.0"
+  version: "1.42.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -7098,7 +7098,7 @@ components:
       required: [id, label, summary, fields]
       additionalProperties: false
       properties:
-        id: { type: string, enum: [fhir_r4, document_archive, file_export, stub] }
+        id: { type: string, enum: [fhir_r4, document_archive, file_export, hl7v2_file, stub] }
         label: { type: string }
         summary: { type: string }
         fields:

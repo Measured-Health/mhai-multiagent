@@ -264,6 +264,38 @@ platform sees it as errors for 24 hours after a run that kept dead letters.
 - The format is published at `docs/specs/formats/mhai_csv_v1.md`, with
   synthetic samples in `internal/connector/fileexport/testdata/sample/`.
 
+## What is built: HL7 v2 message files (`hl7v2_file`)
+
+Design: `docs/designs/2026-11-27-hl7v2-file-connector-and-bridge.md` §3;
+format: `docs/specs/formats/hl7v2_file_v1.md`; ADR 0019. Migration
+**00061** (core) lets `emr_connections.type` and `raw_records.connector_type`
+be `hl7v2_file` and gives it the file export's staleness rule.
+
+- `internal/hl7v2`: the ER7 parser (delimiters from each MSH, escapes
+  decoded only when a value is read, `\r`, `\n` or `\r\n`, FHS/BHS/BTS/FTS
+  envelopes with their counts checked, MSH-18 `ASCII`, `UNICODE UTF-8` or
+  `8859/1` and nothing guessed; caps on file, message, segment, fields,
+  repetitions, components and subcomponents), DTM times (an offset, or the
+  connection's `time_zone`, or refused), and the file names. Fuzzed
+  (`FuzzParseBatch`, `FuzzParseTime`; not in CI).
+- `internal/connector/fileexport` (`NewHL7`): the `file_export` transport
+  unchanged, reading `hl7-<time>[-<seq>].hl7`. ORU^R01 maps to
+  observations, RDE^O11 to medication requests, PID to the patient (the MRN
+  only by `mrn_identifier_type` under `mrn_namespace`), PV1 to the
+  encounter and its ward. Other message types, test messages (MSH-11 not
+  `P`), narrative or pending OBX are skipped and counted
+  (`Metrics.RecordsSkipped`). `FuzzParseHL7` fuzzes the mapper.
+- **The on-site bridge** (`cmd/hl7-bridge`, `internal/hl7bridge`; design
+  §4): for hospitals whose engine can only push MLLP. It ACKs (`AA`) only
+  after the message is fsynced, answers `AE`/`AR` for malformed or
+  oversized messages, drops types the connector doesn't read, remembers
+  control ids for 7 days, spools `hl7v2_file` files and serves them over a
+  key-only SFTP server that can only list, read and move. Image
+  `services/emr/Dockerfile.hl7-bridge`; install guide `deploy/hl7-bridge/`.
+  `FuzzMLLPReader` fuzzes the framer (not in CI).
+- **To switch it on:** mhai-web with `hl7v2_file` in its connector-type
+  enum first, then add `hl7v2_file` to `CORE_EMR_CONNECTOR_TYPES`.
+
 ## Settings
 
 | Variable | |
@@ -271,6 +303,7 @@ platform sees it as errors for 24 hours after a run that kept dead letters.
 | `APP_ENV` | `development`, `staging` or `production` (unset: production) |
 | `EMR_NATS_URL` | no credentials in it; `tls://` outside development |
 | `EMR_NATS_NKEY_FILE` / `EMR_NATS_PASSWORD` | one of them; the password in development only |
+| `EMR_NATS_TLS_CA_FILE`, `EMR_NATS_TLS_CERT_FILE`, `EMR_NATS_TLS_KEY_FILE` | the private CA and this service's NATS client certificate (NATS verifies one): all three or none; required outside development |
 | `EMR_DATABASE_URL` | the `emr_app` login (migration 00020, PR 3); `sslmode=verify-full` outside development |
 | `EMR_TRUSTED_KEYS_PATH` | the request-token trusted-keys file core writes (public keys) |
 | `EMR_SEAL_KEY_PATH` | the directory of the sealing private keys (`seal-<kid>.key`) |

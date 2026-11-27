@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/natstls"
 )
 
 // Settings are the emr service's settings.
@@ -24,6 +26,11 @@ type Settings struct {
 	NATSNKeyFile string
 	// NATSPassword is EMR_NATS_PASSWORD, development only.
 	NATSPassword string
+	// NATSTLS is EMR_NATS_TLS_CA_FILE, EMR_NATS_TLS_CERT_FILE and
+	// EMR_NATS_TLS_KEY_FILE: the deployment's CA and this service's client
+	// certificate for NATS (verify on). All three or none; required outside
+	// development, as core's NATS_TLS_* are.
+	NATSTLS natstls.Files
 	// DatabaseURL is EMR_DATABASE_URL, the emr_app login (sslmode
 	// verify-full outside development).
 	DatabaseURL string
@@ -95,6 +102,8 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		CodesDir:        get("EMR_CODES_DIR"),
 		MapsDir:         get("EMR_MAPS_DIR"),
 		DevCAFile:       get("EMR_DEV_CA_FILE"),
+		NATSTLS: natstls.Files{CA: get("EMR_NATS_TLS_CA_FILE"), Cert: get("EMR_NATS_TLS_CERT_FILE"),
+			Key: get("EMR_NATS_TLS_KEY_FILE")},
 	}
 	var errs []error
 	switch s.Env {
@@ -124,6 +133,13 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		errs = append(errs, errors.New("EMR_NATS_PASSWORD is for development only; use EMR_NATS_NKEY_FILE"))
 	case s.NATSPassword != "" && placeholder(s.NATSPassword):
 		errs = append(errs, errors.New("EMR_NATS_PASSWORD is a placeholder"))
+	}
+	tlsNames := "EMR_NATS_TLS_CA_FILE, EMR_NATS_TLS_CERT_FILE and EMR_NATS_TLS_KEY_FILE"
+	switch {
+	case s.NATSTLS.Set() && !s.NATSTLS.Complete():
+		errs = append(errs, errors.New(tlsNames+" must be set together"))
+	case !s.NATSTLS.Complete() && !s.Development():
+		errs = append(errs, errors.New(tlsNames+" are required outside development (NATS verifies a client certificate)"))
 	}
 	if s.DatabaseURL != "" && !s.Development() && !verifyFull(s.DatabaseURL) {
 		errs = append(errs, errors.New("EMR_DATABASE_URL must be a postgres:// URL with sslmode=verify-full outside development"))

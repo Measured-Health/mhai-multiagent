@@ -23,11 +23,14 @@ func devEnv() map[string]string {
 
 func prodEnv() map[string]string {
 	return map[string]string{
-		"APP_ENV":                  "production",
-		"NOTIFY_NATS_URL":          "tls://nats:4222",
-		"NOTIFY_NATS_NKEY_FILE":    "/run/secrets/notifications.nk",
-		"NOTIFY_DATABASE_URL":      "postgres://notify_app@db:5432/mhai?sslmode=verify-full",
-		"NOTIFY_TRUSTED_KEYS_PATH": "/trusted/request-keys.json",
+		"APP_ENV":                   "production",
+		"NOTIFY_NATS_URL":           "tls://nats:4222",
+		"NOTIFY_NATS_NKEY_FILE":     "/run/secrets/notifications.nk",
+		"NOTIFY_DATABASE_URL":       "postgres://notify_app@db:5432/mhai?sslmode=verify-full",
+		"NOTIFY_TRUSTED_KEYS_PATH":  "/trusted/request-keys.json",
+		"NOTIFY_NATS_TLS_CA_FILE":   "/run/tls/ca.pem",
+		"NOTIFY_NATS_TLS_CERT_FILE": "/run/tls/notifications.pem",
+		"NOTIFY_NATS_TLS_KEY_FILE":  "/run/tls/notifications-key.pem",
 	}
 }
 
@@ -158,5 +161,39 @@ func TestSettingsRefusals(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Outside development NATS verifies a client certificate (as for core), so
+// the three NOTIFY_NATS_TLS_* files are required there, all or none
+// everywhere, as absolute paths; staging is held to the same rule.
+func TestNATSTLSFiles(t *testing.T) {
+	s, err := FromEnv(env(prodEnv()))
+	if err != nil || !s.NATSTLS.Complete() || s.NATSTLS.Cert != "/run/tls/notifications.pem" {
+		t.Fatalf("production with the files: %+v %v", s, err)
+	}
+	for _, envName := range []string{"staging", "production", ""} {
+		for _, drop := range []string{"NOTIFY_NATS_TLS_CA_FILE", "NOTIFY_NATS_TLS_CERT_FILE", "NOTIFY_NATS_TLS_KEY_FILE"} {
+			p := prodEnv()
+			p["APP_ENV"] = envName
+			delete(p, drop)
+			_, err := FromEnv(env(p))
+			if err == nil || !strings.Contains(err.Error(), "NOTIFY_NATS_TLS_") || strings.Contains(err.Error(), "/run/tls") {
+				t.Errorf("%q without %s: %v", envName, drop, err)
+			}
+		}
+	}
+	p := prodEnv()
+	p["NOTIFY_NATS_TLS_KEY_FILE"] = "run/tls/notifications-key.pem"
+	if _, err := FromEnv(env(p)); err == nil || !strings.Contains(err.Error(), "NOTIFY_NATS_TLS_KEY_FILE must be an absolute path") {
+		t.Fatalf("relative key path: %v", err)
+	}
+	d := devEnv()
+	d["NOTIFY_NATS_TLS_CERT_FILE"] = "/run/tls/notifications.pem"
+	if _, err := FromEnv(env(d)); err == nil || !strings.Contains(err.Error(), "set together") {
+		t.Fatalf("development, one file: %v", err)
+	}
+	if s, err := FromEnv(env(devEnv())); err != nil || s.NATSTLS.Set() {
+		t.Fatalf("development, none: %+v %v", s, err)
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Measured-Health/mhai-multiagent/services/core/internal/audit"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/authz"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/db"
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/delivery"
@@ -745,6 +746,58 @@ func TestActivity(t *testing.T) {
 	}
 	if code, _, _ := get("type=bogus"); code != 422 {
 		t.Errorf("bad type %d", code)
+	}
+}
+
+// TestActivitySignInTwoStep: a two-step sign-in writes two
+// auth.login.succeeded rows, the password step's (entity user,
+// {mfa_required: true}, no session yet) and the session's ({mfa: true}).
+// Activity shows the sign-in once, as signed_in; only a session issued
+// without two-step ({mfa: false}) is signed_in_without_mfa. Seen live: every
+// two-step sign-in also showed "Signed in without two-step (setup pending)".
+func TestActivitySignInTwoStep(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	tx, err := sharedSuper.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	write := func(u uuid.UUID, entity, entityID string, payload map[string]any) {
+		t.Helper()
+		if err := audit.Write(ctx, tx, audit.Event{ActorID: u.String(), HospitalID: w.h.String(), Action: "auth.login.succeeded",
+			Entity: entity, EntityID: entityID, Payload: payload}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Ada: password, then two-step.
+	write(w.ada, "user", w.ada.String(), map[string]any{"mfa_required": true})
+	write(w.ada, "session", uuid.NewString(), map[string]any{"mfa": true, "amr": []string{"pwd", "otp"}})
+	// Ben: a session without two-step.
+	write(w.ben, "session", uuid.NewString(), map[string]any{"mfa": false, "amr": []string{"pwd"}})
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	code, raw := w.as(w.h, w.admin, http.MethodGet, "/hospital/activity?type=sign_in", "")
+	if code != 200 {
+		t.Fatalf("activity %d %s", code, raw)
+	}
+	var page struct {
+		Events []struct {
+			Kind  string `json:"kind"`
+			Actor struct {
+				DisplayName string `json:"display_name"`
+			} `json:"actor"`
+		} `json:"events"`
+	}
+	_ = json.Unmarshal(raw, &page)
+	var got []string
+	for _, e := range page.Events {
+		got = append(got, strings.SplitN(e.Actor.DisplayName, " ", 3)[1]+":"+e.Kind)
+	}
+	want := []string{"Ben:signed_in_without_mfa", "Ada:signed_in"}
+	if !slices.Equal(got, want) {
+		t.Errorf("sign-ins %v, want %v", got, want)
 	}
 }
 

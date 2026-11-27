@@ -1,0 +1,26 @@
+# The on-site HL7 bridge (design docs/designs/2026-11-27-hl7v2-file-
+# connector-and-bridge.md §4.6): one static binary, non-root, no shell.
+# The hospital runs it (deploy/hl7-bridge/). Built from services/:
+#   docker build -f services/emr/Dockerfile.hl7-bridge services
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+COPY gokit/go.mod gokit/go.sum gokit/
+COPY emr/go.mod emr/go.sum emr/
+WORKDIR /src/emr
+RUN go mod download
+COPY gokit/ /src/gokit/
+COPY emr/ /src/emr/
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/hl7-bridge ./cmd/hl7-bridge && \
+    mkdir -p /out/spool /out/state
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/hl7-bridge /hl7-bridge
+# /spool holds the batch files (PHI: the host's disk must be encrypted),
+# /state the SSH host key and the received log. Both 0700, owned by the
+# nonroot user, so a fresh volume takes them on first mount.
+COPY --from=build --chown=65532:65532 --chmod=0700 /out/spool /spool
+COPY --from=build --chown=65532:65532 --chmod=0700 /out/state /state
+USER nonroot:nonroot
+EXPOSE 2575 2222
+ENTRYPOINT ["/hl7-bridge"]
+CMD ["serve"]

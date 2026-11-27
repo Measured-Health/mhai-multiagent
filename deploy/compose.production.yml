@@ -1,0 +1,118 @@
+# Production mode for a single-host backend (deploy/README.md, "Production
+# mode"; docs/deploy/production-tls-emr.md). deploy/production/
+# enable-production.sh turns it on by writing
+#   COMPOSE_FILE=compose.yml:compose.production.yml
+# into .env, so every `docker compose` in /srv/mhai-backend (the deploy
+# workflow's included) keeps it; its --rollback takes it out again. The deploy
+# workflow ships this file, nats/tls.conf and postgres/pg_hba.production.conf
+# with every release, so the host never runs a stale copy.
+#
+#   - Postgres turns TLS on (its server certificate names `postgres`) and
+#     takes its client rules from postgres/pg_hba.production.conf: TLS with
+#     a password from this host's Docker networks only, anything without TLS
+#     refused; the container's own socket (health check, backups, the deploy's
+#     checks) as before.
+#   - NATS runs nats/tls.conf: nats.conf unchanged plus TLS with verify, so
+#     every client shows a certificate from the private CA and still signs
+#     in with its NKey.
+#   - Every client connects with TLS and checks the server's name against
+#     the CA (sslmode=verify-full, sslrootcert): core, core-migrate, core-cli,
+#     the pipeline, notifications and the emr service; core, the pipeline,
+#     notifications and emr (and the BFFs, mhai-web's compose.nats-tls.yml)
+#     with their own NATS client certificate.
+#   - core runs as production (CORE_ENV): no API docs, no dev links, its
+#     production start-up checks. CORE_ALLOW_SINGLE_NODE=true says out loud
+#     that JetStream has one replica on this one host.
+#   - the pipeline drops INTELLIGENCE_SINGLE_HOST (TLS on both links); the
+#     notifications service runs as production.
+#
+# The files are under tls/ (one folder per service, the key 0400, 0600 for
+# Postgres, owned by the service's uid) and secrets/bff/tls/ (the BFFs),
+# issued by enable-production.sh from the operator's private CA
+# (deploy/tls/). None is in the repository.
+#
+# The demo profile is not supported here: its one-shots connect without TLS
+# and Postgres refuses them (a live site never runs the demo anyway).
+
+services:
+  postgres:
+    command:
+      - postgres
+      - -c
+      - shared_buffers=48MB
+      - -c
+      - max_connections=40
+      - -c
+      - password_encryption=scram-sha-256
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/etc/postgresql/tls/server.pem
+      - -c
+      - ssl_key_file=/etc/postgresql/tls/server-key.pem
+      - -c
+      - ssl_min_protocol_version=TLSv1.2
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+    volumes:
+      - ./tls/postgres:/etc/postgresql/tls:ro
+      - ./postgres/pg_hba.production.conf:/etc/postgresql/pg_hba.conf:ro
+
+  nats:
+    command: ["-c", "/etc/nats/tls.conf"]
+    volumes:
+      - ./nats/tls.conf:/etc/nats/tls.conf:ro
+      - ./tls/nats:/etc/nats/tls:ro
+
+  core-migrate:
+    environment:
+      DATABASE_URL: postgres://pgadmin:${POSTGRES_PASSWORD:?set in /srv/mhai-backend/.env}@postgres:5432/mhai?sslmode=verify-full&sslrootcert=/run/tls/ca.pem
+    volumes:
+      - ./tls/core:/run/tls:ro
+
+  core:
+    environment:
+      CORE_ENV: production
+      CORE_ALLOW_SINGLE_NODE: "true"
+      # pool_max_conns: core's leader loops each hold a pooled connection
+      # (a session advisory lock) while their run takes another, and pgx's
+      # default pool is max(4, CPUs), 4 under the 2-CPU cpuset: with the EMR's
+      # loop too the pool ran dry and readyz hung (rehearsal, 27 Nov). 16 is
+      # well above the loops; with emr's 6, notifications' 4 and the
+      # pipeline's 4 it stays inside max_connections (40).
+      DATABASE_URL: postgres://core_app:${CORE_DB_PASSWORD:?set in /srv/mhai-backend/.env}@postgres:5432/mhai?sslmode=verify-full&sslrootcert=/run/tls/ca.pem&pool_max_conns=16
+      NATS_URL: tls://nats:4222
+      NATS_TLS_CA_PATH: /run/tls/ca.pem
+      NATS_TLS_CERT_PATH: /run/tls/core.pem
+      NATS_TLS_KEY_PATH: /run/tls/core-key.pem
+    volumes:
+      - ./tls/core:/run/tls:ro
+
+  core-cli:
+    environment:
+      DATABASE_URL: postgres://core_provision:${PROVISION_DB_PASSWORD:?set in /srv/mhai-backend/.env}@postgres:5432/mhai?sslmode=verify-full&sslrootcert=/run/tls/ca.pem
+    volumes:
+      - ./tls/core:/run/tls:ro
+
+  pipeline:
+    environment:
+      # Empty is off: TLS on both links, the production rule.
+      INTELLIGENCE_SINGLE_HOST: ""
+      NATS_URL: tls://nats:4222
+      NATS_TLS_CA_PATH: /run/tls/ca.pem
+      NATS_TLS_CERT_PATH: /run/tls/pipeline.pem
+      NATS_TLS_KEY_PATH: /run/tls/pipeline-key.pem
+      INTELLIGENCE_DB_URL: postgres://postgres:5432/mhai?sslmode=verify-full&sslrootcert=/run/tls/ca.pem
+    volumes:
+      - ./tls/pipeline:/run/tls:ro
+
+  notifications:
+    environment:
+      APP_ENV: production
+      NOTIFY_NATS_URL: tls://nats:4222
+      NOTIFY_NATS_TLS_CA_FILE: /run/tls/ca.pem
+      NOTIFY_NATS_TLS_CERT_FILE: /run/tls/notifications.pem
+      NOTIFY_NATS_TLS_KEY_FILE: /run/tls/notifications-key.pem
+      NOTIFY_DATABASE_URL: postgres://notify_app:${NOTIFY_DB_PASSWORD:-}@postgres:5432/mhai?sslmode=verify-full&sslrootcert=/run/tls/ca.pem&pool_max_conns=4
+    volumes:
+      - ./tls/notifications:/run/tls:ro

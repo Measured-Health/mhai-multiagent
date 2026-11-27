@@ -626,6 +626,13 @@ jobs:
           docker build -t mhai-emr:ci -f services/emr/Dockerfile services
           out=$(docker run --rm mhai-emr:ci help 2>&1 || true)
           case "$out" in "usage: emr"*) echo "the emr image runs" ;; *) echo "::error::the emr image doesn't run"; exit 1 ;; esac
+      - name: Build the HL7 bridge image from services/
+        if: steps.changes.outputs.go_image == 'true'
+        run: |
+          docker build -t mhai-hl7-bridge:ci -f services/emr/Dockerfile.hl7-bridge services
+          out=$(docker run --rm mhai-hl7-bridge:ci help 2>&1 || true)
+          case "$out" in "usage: hl7-bridge"*) echo "the bridge image runs" ;; *) echo "::error::the bridge image doesn't run"; exit 1 ;; esac
+          test "$(docker image inspect -f '{{.Config.User}}' mhai-hl7-bridge:ci)" = "nonroot:nonroot"
       - name: Build the documents image from services/
         if: steps.changes.outputs.go_image == 'true'
         run: |

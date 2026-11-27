@@ -9,7 +9,7 @@ import (
 const MaxBackoff = 15 * time.Minute
 
 // Stale reports whether a source counts as stale (design §15.4): no
-// successful poll for 3 poll intervals; for file_export also no new file
+// successful poll for 3 poll intervals; for file_export and hl7v2_file also no new file
 // for longer than the declared interval plus 50% (required for that type).
 // A source we can't judge (an unknown type, no interval, never polled, a
 // last success in the future) is stale: doubt never reads as fresh.
@@ -23,7 +23,7 @@ func Stale(connType string, lastOK time.Time, pollSeconds int, expectedEveryMinu
 	switch connType {
 	case "fhir_r4", "document_archive":
 		return false
-	case "file_export":
+	case "file_export", "hl7v2_file":
 		if expectedEveryMinutes == nil || *expectedEveryMinutes <= 0 || lastNewFile == nil || lastNewFile.After(now) {
 			return true
 		}

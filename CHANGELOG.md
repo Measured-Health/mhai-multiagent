@@ -6,6 +6,34 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Production mode and the EMR switch for the single-host backend**
+  (deploy/README.md, "Production mode" and "EMR integration";
+  docs/deploy/production-tls-emr.md). `production/enable-production.sh`:
+  a private CA, NATS with client-certificate verify, Postgres TLS-only with
+  verify-full for every client, core as production, rollback.
+  `emr/enable-emr.sh`: the emr service (staging) with its NKey, login, keys
+  and egress deny-list; the deploy publishes the emr image and keeps it
+  running. The emr and notifications services take
+  `*_NATS_TLS_CA_FILE`/`CERT_FILE`/`KEY_FILE`, required outside development.
+
+- **HL7 v2 message files (`hl7v2_file`, OpenAPI 1.42.0, migration 00061).**
+  A new EMR connector type reads HL7 v2 ORU^R01 (results and vital signs)
+  and RDE^O11 (medication orders) from batch files pulled over SFTP, on the
+  `file_export` transport (pinned host key, `processed/` and `rejected/`,
+  nothing deleted). The messages map to the same raw records as FHIR, so
+  normalisation, rules and alerts are unchanged. `EmrConnectorType.id` gains
+  `hl7v2_file` (additive). Design
+  `docs/designs/2026-11-27-hl7v2-file-connector-and-bridge.md`, ADR 0019.
+  Off until `hl7v2_file` is in `CORE_EMR_CONNECTOR_TYPES`.
+- **The on-site HL7 bridge (`hl7-bridge`).** For a hospital whose interface
+  engine can only push HL7 v2 over MLLP: it runs next to the engine,
+  acknowledges each message only once it is on disk, and serves
+  `hl7v2_file` files over its own key-only SFTP server, so MHAI still only
+  pulls. Image `services/emr/Dockerfile.hl7-bridge`, compose example and
+  install guide in `deploy/hl7-bridge/`.
+
 ### Changed
 
 - **Fewer "can't be displayed" entries in the platform audit log.** Eighteen
@@ -27,6 +55,30 @@ All notable changes to this project are documented here. The format follows
   providers, reasons, periods, filters) is sent as a fact. The vendored
   mhai-web vocabulary is re-copied from mhai-web main with mhai-web PR #129's
   six kinds, so `pending_in_web` is empty.
+- **HGA grounding reads a cited chunk sentence by sentence (clinical review).**
+  The NLI model (`cross-encoder/nli-deberta-v3-base`) is trained on sentence
+  pairs, and against a long guideline chunk it called even a sentence copied
+  word for word from that chunk neutral (0.99), so every live citation was
+  `not_entailed`, `nli_score` was 0 and answers escalated.
+  `CitationVerificationPipeline` now scores each claim against windows of
+  its chunk (`premise_windows`: the whole chunk, each sentence, each pair of
+  adjacent sentences; at most `NLI_MAX_WINDOWS` = 24, longer chunks grouped
+  so every sentence is still read), in batched forward passes under the
+  verifier's lock (`NLIEntailmentVerifier.verify_pairs`, `windows_for`).
+  Safety first: a claim is `entailed` only when some window's entailment is
+  at least 0.7 and there is no contradiction; a contradiction (at least 0.5)
+  vetoes even an entailed claim and is `contradicted`. The contradiction
+  counted is the whole chunk's (exactly the check made before, so every
+  contradiction found before is still found) or that of the claim's own
+  sentence (`aligned_windows`: the window sharing most of the claim's
+  words). It is not the highest over every window: the model calls two
+  different facts of one source contradictory ("Hypertension defined as
+  ..." against "T2DM: fasting glucose ..."; the adult-dose sentence against
+  the pediatric-dose one), and that rule vetoed 48 of 48 claims copied word
+  for word from a long chunk, and 3 of 7 sentences copied from a
+  synthetic drug label. The thresholds are unchanged. The rule-based
+  fallback still reads the whole chunk. Before/after:
+  `scripts/hga_grounding_eval.py`.
 
 - **One renewable backup code per account (OpenAPI 1.38.0).** Enrolment and
   `POST /auth/mfa/recovery-codes` now give exactly one backup code
@@ -50,6 +102,27 @@ All notable changes to this project are documented here. The format follows
   header and show the new code.
 
 ### Fixed
+
+- **Backend deploy pulls the EMR image every time**, so
+  `emr/enable-emr.sh`, run later by the operator without a registry login,
+  finds it on the host (27 Nov: it stopped with "could not pull").
+
+- **Backend deploy: the first deploy of production mode no longer stops
+  silently.** The deploy script hashed `nats/nats.conf` and `nats/tls.conf`
+  before unpacking; `tls.conf` is new in that release, so `cat` failed and,
+  under `set -euo pipefail`, the assignment ended the script with no output
+  (27 Nov, before any change on the host). A missing file now hashes as
+  empty.
+
+- **A hospital's Activity showed every two-step sign-in twice, once as
+  "Signed in without two-step".** A two-step sign-in writes
+  `auth.login.succeeded` at the password step (`{mfa_required: true}`, no
+  session yet) and again for the session (`{mfa: true}`). `GET
+  /hospital/activity` read the first as `signed_in_without_mfa` (no `mfa`
+  key), so the hospital admin saw a false "Signed in without two-step (setup
+  pending)" beside each real sign-in. The password step's row is no longer
+  listed, and only a session issued with `mfa: false` is
+  `signed_in_without_mfa`. Found by the whole-journey live check.
 
 - **Deploys no longer fail "the pipeline did not start" on a long-running
   host.** The start checks piped `docker compose logs` into `grep -q`
