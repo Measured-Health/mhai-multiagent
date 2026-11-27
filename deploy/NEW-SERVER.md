@@ -147,6 +147,22 @@ Then, in order:
 
 Real patient data still waits on the go-live sign-offs in TODO.md.
 
+## Production mode and the EMR (a live server)
+
+A server that will hold real data runs the backend in production mode (TLS
+for NATS and Postgres, core as production), then the EMR. After step 5 and
+the "Live site" steps, in this order, on the server:
+
+```bash
+cd /srv/mhai-backend
+bash production/enable-production.sh --check && bash production/enable-production.sh --prepare
+bash production/enable-production.sh          # about 25 s of downtime; move ~/mhai-ca off the host after
+bash emr/enable-emr.sh --check && bash emr/enable-emr.sh
+```
+
+deploy/README.md, "Production mode" and "EMR integration", has the checks,
+the CA's custody, renewal and rollback.
+
 ## Moving the demo to a new server
 
 To move `ai.measured-health.org` (and `platforms.measured-health.org`) from

@@ -156,6 +156,7 @@ migration 00054).
 | `APP_ENV` | `development`, `staging` or `production` (unset is production) |
 | `NOTIFY_NATS_URL` | `tls://` outside development; no credentials in it |
 | `NOTIFY_NATS_NKEY_FILE` | the NKey seed (required outside development) |
+| `NOTIFY_NATS_TLS_CA_FILE`, `NOTIFY_NATS_TLS_CERT_FILE`, `NOTIFY_NATS_TLS_KEY_FILE` | the private CA and this service's NATS client certificate (NATS verifies one): all three or none, absolute paths; required outside development |
 | `NOTIFY_NATS_PASSWORD` | development only |
 | `NOTIFY_DATABASE_URL` | the `notify_app` login; `sslmode=verify-full` outside development |
 | `NOTIFY_TRUSTED_KEYS_PATH` | core's request-token trusted keys (public), an absolute path |

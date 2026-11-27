@@ -271,6 +271,7 @@ platform sees it as errors for 24 hours after a run that kept dead letters.
 | `APP_ENV` | `development`, `staging` or `production` (unset: production) |
 | `EMR_NATS_URL` | no credentials in it; `tls://` outside development |
 | `EMR_NATS_NKEY_FILE` / `EMR_NATS_PASSWORD` | one of them; the password in development only |
+| `EMR_NATS_TLS_CA_FILE`, `EMR_NATS_TLS_CERT_FILE`, `EMR_NATS_TLS_KEY_FILE` | the private CA and this service's NATS client certificate (NATS verifies one): all three or none; required outside development |
 | `EMR_DATABASE_URL` | the `emr_app` login (migration 00020, PR 3); `sslmode=verify-full` outside development |
 | `EMR_TRUSTED_KEYS_PATH` | the request-token trusted-keys file core writes (public keys) |
 | `EMR_SEAL_KEY_PATH` | the directory of the sealing private keys (`seal-<kid>.key`) |

@@ -20,12 +20,15 @@ func devEnv() map[string]string {
 
 func prodEnv() map[string]string {
 	return map[string]string{
-		"APP_ENV":               "production",
-		"EMR_NATS_URL":          "tls://nats:4222",
-		"EMR_NATS_NKEY_FILE":    "/run/secrets/emr.nk",
-		"EMR_DATABASE_URL":      "postgres://emr_app@db:5432/mhai?sslmode=verify-full",
-		"EMR_TRUSTED_KEYS_PATH": "/trusted/request-keys.json",
-		"EMR_SEAL_KEY_PATH":     "/emr-keys/seal.key",
+		"APP_ENV":                "production",
+		"EMR_NATS_URL":           "tls://nats:4222",
+		"EMR_NATS_NKEY_FILE":     "/run/secrets/emr.nk",
+		"EMR_DATABASE_URL":       "postgres://emr_app@db:5432/mhai?sslmode=verify-full",
+		"EMR_TRUSTED_KEYS_PATH":  "/trusted/request-keys.json",
+		"EMR_SEAL_KEY_PATH":      "/emr-keys/seal.key",
+		"EMR_NATS_TLS_CA_FILE":   "/run/tls/ca.pem",
+		"EMR_NATS_TLS_CERT_FILE": "/run/tls/emr.pem",
+		"EMR_NATS_TLS_KEY_FILE":  "/run/tls/emr-key.pem",
 	}
 }
 
@@ -172,5 +175,36 @@ func TestRulesSettings(t *testing.T) {
 		if _, err := FromEnv(env(e)); err == nil {
 			t.Errorf("EMR_BREAKER_MULTIPLE=%s accepted", v)
 		}
+	}
+}
+
+// Outside development NATS verifies a client certificate (as for core), so
+// the three EMR_NATS_TLS_* files are required there, all or none
+// everywhere; staging is held to the same rule. In development they are
+// optional (the dev stacks run NATS without TLS).
+func TestNATSTLSFiles(t *testing.T) {
+	s, err := FromEnv(env(prodEnv()))
+	if err != nil || !s.NATSTLS.Complete() || s.NATSTLS.Key != "/run/tls/emr-key.pem" {
+		t.Fatalf("production with the files: %+v %v", s, err)
+	}
+	for _, envName := range []string{"staging", "production", ""} {
+		for _, drop := range []string{"EMR_NATS_TLS_CA_FILE", "EMR_NATS_TLS_CERT_FILE", "EMR_NATS_TLS_KEY_FILE"} {
+			p := prodEnv()
+			p["APP_ENV"] = envName
+			delete(p, drop)
+			_, err := FromEnv(env(p))
+			if err == nil || !strings.Contains(err.Error(), "EMR_NATS_TLS_") || strings.Contains(err.Error(), "/run/tls") {
+				t.Errorf("%q without %s: %v", envName, drop, err)
+			}
+		}
+	}
+	d := devEnv()
+	d["EMR_NATS_TLS_CA_FILE"] = "/run/tls/ca.pem"
+	if _, err := FromEnv(env(d)); err == nil || !strings.Contains(err.Error(), "set together") {
+		t.Fatalf("development, one file: %v", err)
+	}
+	d["EMR_NATS_TLS_CERT_FILE"], d["EMR_NATS_TLS_KEY_FILE"] = "/run/tls/emr.pem", "/run/tls/emr-key.pem"
+	if s, err := FromEnv(env(d)); err != nil || !s.NATSTLS.Complete() {
+		t.Fatalf("development, all three: %+v %v", s, err)
 	}
 }

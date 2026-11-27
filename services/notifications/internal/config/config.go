@@ -14,6 +14,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/Measured-Health/mhai-multiagent/services/gokit/natstls"
 )
 
 // ChannelLog is the development channel: it logs that a message would be
@@ -38,6 +40,11 @@ type Settings struct {
 	NATSNKeyFile string
 	// NATSPassword is NOTIFY_NATS_PASSWORD, development only.
 	NATSPassword string
+	// NATSTLS is NOTIFY_NATS_TLS_CA_FILE, NOTIFY_NATS_TLS_CERT_FILE and
+	// NOTIFY_NATS_TLS_KEY_FILE: the deployment's CA and this service's
+	// client certificate for NATS (verify on). All three or none; required
+	// outside development, as core's NATS_TLS_* are.
+	NATSTLS natstls.Files
 	// DatabaseURL is NOTIFY_DATABASE_URL, the service's own login (a
 	// member of mhai_notify_app only); sslmode verify-full outside
 	// development.
@@ -97,6 +104,8 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		NATSPassword:    getenv("NOTIFY_NATS_PASSWORD"),
 		DatabaseURL:     get("NOTIFY_DATABASE_URL"),
 		TrustedKeysPath: get("NOTIFY_TRUSTED_KEYS_PATH"),
+		NATSTLS: natstls.Files{CA: get("NOTIFY_NATS_TLS_CA_FILE"), Cert: get("NOTIFY_NATS_TLS_CERT_FILE"),
+			Key: get("NOTIFY_NATS_TLS_KEY_FILE")},
 	}
 	channels, chErr := parseChannels(get("NOTIFY_CHANNELS"), s.Env == "development")
 	s.Channels = channels
@@ -146,6 +155,19 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		errs = append(errs, errors.New("NOTIFY_NATS_PASSWORD is for development only; use NOTIFY_NATS_NKEY_FILE"))
 	case s.NATSPassword != "" && placeholder(s.NATSPassword):
 		errs = append(errs, errors.New("NOTIFY_NATS_PASSWORD is a placeholder"))
+	}
+	tlsNames := "NOTIFY_NATS_TLS_CA_FILE, NOTIFY_NATS_TLS_CERT_FILE and NOTIFY_NATS_TLS_KEY_FILE"
+	switch {
+	case s.NATSTLS.Set() && !s.NATSTLS.Complete():
+		errs = append(errs, errors.New(tlsNames+" must be set together"))
+	case !s.NATSTLS.Complete() && !s.Development():
+		errs = append(errs, errors.New(tlsNames+" are required outside development (NATS verifies a client certificate)"))
+	}
+	for _, kv := range [][2]string{{"NOTIFY_NATS_TLS_CA_FILE", s.NATSTLS.CA}, {"NOTIFY_NATS_TLS_CERT_FILE", s.NATSTLS.Cert},
+		{"NOTIFY_NATS_TLS_KEY_FILE", s.NATSTLS.Key}} {
+		if kv[1] != "" && !filepath.IsAbs(kv[1]) {
+			errs = append(errs, fmt.Errorf("%s must be an absolute path", kv[0]))
+		}
 	}
 	if s.DatabaseURL != "" {
 		switch {

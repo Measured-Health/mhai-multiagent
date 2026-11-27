@@ -1,0 +1,27 @@
+# The EMR integration's settings for core (deploy/README.md, "EMR
+# integration"). deploy/emr/enable-emr.sh turns it on by appending this file
+# to COMPOSE_FILE in .env, after compose.production.yml (the emr service
+# speaks TLS only); its --disable takes it out again. The emr and egress-emr
+# services themselves are in compose.yml (profile emr).
+#
+#   - CORE_EMR_ENABLED: the EMR stream, core's emr calls, the connection
+#     screens and the clinician lookup;
+#   - the sealing PUBLIC key core seals credentials to (secrets/emr-seal.pub,
+#     a copy of emr/seal/seal-<kid>.pub; never the private half);
+#   - the idempotency HMAC key (secrets/core-idempotency-hmac.key, 0400,
+#     uid 65532);
+#   - the connector types the platform may offer: CORE_EMR_CONNECTOR_TYPES in
+#     .env, fhir_r4,file_export by default. Core refuses a type its image
+#     wasn't built with, so add one (hl7v2_file) only after that release is
+#     deployed: `enable-emr.sh --connector-types fhir_r4,file_export,hl7v2_file`.
+
+services:
+  core:
+    environment:
+      CORE_EMR_ENABLED: "true"
+      CORE_EMR_SEAL_PUBLIC_KEY_PATH: /run/emr/seal.pub
+      CORE_IDEMPOTENCY_HMAC_KEY_PATH: /run/emr/idempotency-hmac.key
+      CORE_EMR_CONNECTOR_TYPES: ${CORE_EMR_CONNECTOR_TYPES:-fhir_r4,file_export}
+    volumes:
+      - ./secrets/emr-seal.pub:/run/emr/seal.pub:ro
+      - ./secrets/core-idempotency-hmac.key:/run/emr/idempotency-hmac.key:ro
