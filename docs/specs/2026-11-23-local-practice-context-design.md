@@ -67,7 +67,7 @@ The danger is that practice gets mistaken for evidence. Local habit is not a gui
 | Corrections | Practice can't change the system unreviewed | A correction that quotes practice is still a correction: ADR 0005's second clinician applies. Practice data is never turned into a correction or a KB row automatically |
 | Training | Model improvement uses cases, never practice figures, and never as "the right answer" by default | §10.2: test-case labels come from the guideline or a clinician, not from what was prescribed |
 
-**The checklist line.** SKILLS.md §1 gains a second scoped exception (ADR 0019, §14 PR 1): `services/core/internal/localpractice` may aggregate visits across patients, and across hospitals for the pooled tier, under §6. The rule stays absolute for intelligence, retrieval, prompts, models and every NATS operation. The review checklist gains: "Does anything from `lp_*` or `internal/localpractice` reach a worker, NATS, `kb_chunks` or a prompt?"
+**The checklist line.** SKILLS.md §1 gains a second scoped exception (ADR 0020, §14 PR 1): `services/core/internal/localpractice` may aggregate visits across patients, and across hospitals for the pooled tier, under §6. The rule stays absolute for intelligence, retrieval, prompts, models and every NATS operation. The review checklist gains: "Does anything from `lp_*` or `internal/localpractice` reach a worker, NATS, `kb_chunks` or a prompt?"
 
 ## 4. Agreements, scopes and prerequisites
 
@@ -243,7 +243,7 @@ The contributor set for a window can change after its body is published: a hospi
 - **No rows exist to drill.** There is no visit-level route.
 - **Noise would mislead clinicians** on small hospitals' figures, and would contradict ADR 0015's exact-count ruling, which Analysis's admins rely on.
 - **Suppression is the floor, not the ceiling.** k ≥ 10 for own figures is double Analysis's 5 because the audience (every clinician) is wider and has no drill-down controls. Pooled adds contributor, dominance, rounding and scheduling rules, because the threat there is a hospital, not a person.
-- **If the query surface ever grows** (free filters, on-demand pooled queries, or pooled counts in a UI), this argument fails and the design must be revisited, likely with noise for the pooled tier. That is recorded as a constraint in ADR 0019.
+- **If the query surface ever grows** (free filters, on-demand pooled queries, or pooled counts in a UI), this argument fails and the design must be revisited, likely with noise for the pooled tier. That is recorded as a constraint in ADR 0020.
 
 ## 7. The panel
 
@@ -488,14 +488,14 @@ All with synthetic visits, seeded.
 - **H-LP1 (privacy lead):** the tiers, k = 10, the pooled thresholds (20, 3, 60%, 5-point rounding), the membership-change rule, R-LP1, R-LP3 to R-LP6.
 - **H-LP2 (clinical lead):** the panel (label, PASS only), the condition mapping, the divergence rule set for the loaded guideline, test-case labelling (§10.2), R-LP2.
 - **H-LP3 (legal):** the agreement template's data-sharing clause (pooled aggregates and model improvement), revocation and R-LP7, the researcher's environment (Q7).
-- **H-LP4 (product owner):** ADR 0019 and this design.
+- **H-LP4 (product owner):** ADR 0020 and this design.
 - **Per hospital:** the onboarding record with its references (§4.1).
 
 These go in TODO.md.
 
 ## 14. Phases (the plan has the detail)
 
-`docs/plans/2026-11-23-local-practice-context.md`. Ten PRs, each off by default: decisions on paper (ADR 0019, SKILLS.md, contract), storage and agreements, normaliser, importer, own bodies, Analysis view, rules, panel route, pooled run, the model-improvement scope gate.
+`docs/plans/2026-11-23-local-practice-context.md`. Ten PRs, each off by default: decisions on paper (ADR 0020, SKILLS.md, contract), storage and agreements, normaliser, importer, own bodies, Analysis view, rules, panel route, pooled run, the model-improvement scope gate.
 
 ## 15. What's needed from people
 

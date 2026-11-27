@@ -15,10 +15,9 @@ NATS_EMR_CONF=emr.conf NATS_EMR_PASSWORD=<letters and digits> docker compose --p
 
 Without `NATS_EMR_CONF` NATS includes `services/nats/emr-off.conf` (no
 variable needed, nobody signs in as emr), so today's dev setups run as
-before. **The demo has neither the emr NATS user nor the emr service yet:**
-both come in a later PR, once ops provision `NATS_EMR_NKEY` on the host
-(TODO.md, people/ops item); an undefined NKey variable would stop the demo's
-NATS.
+before. **A host gets the emr NATS user and the emr service from
+`deploy/emr/enable-emr.sh`** (deploy/README.md, "EMR integration"; production
+mode first): on the live host since 27 Nov 2026.
 
 ## What is built (PR 2: the skeleton)
 
