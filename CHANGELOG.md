@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **HL7 v2 message files (`hl7v2_file`, OpenAPI 1.42.0, migration 00061).**
+  A new EMR connector type reads HL7 v2 ORU^R01 (results and vital signs)
+  and RDE^O11 (medication orders) from batch files pulled over SFTP, on the
+  `file_export` transport (pinned host key, `processed/` and `rejected/`,
+  nothing deleted). The messages map to the same raw records as FHIR, so
+  normalisation, rules and alerts are unchanged. `EmrConnectorType.id` gains
+  `hl7v2_file` (additive). Design
+  `docs/designs/2026-11-27-hl7v2-file-connector-and-bridge.md`, ADR 0019.
+  Off until `hl7v2_file` is in `CORE_EMR_CONNECTOR_TYPES`.
+
 ### Changed
 
 - **One renewable backup code per account (OpenAPI 1.38.0).** Enrolment and

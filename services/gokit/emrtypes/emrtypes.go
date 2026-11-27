@@ -106,6 +106,26 @@ var Types = []TypeInfo{
 			{Key: "mrn_namespace", Label: "MRN identifier system", Kind: KindText, Max: 200},
 			{Key: "access_key", Label: "Access key", Kind: KindSecret, Required: true, Max: 4000},
 		}},
+	// hl7v2_file: built (design 2026-11-27 §3), HL7 v2 message files
+	// (ORU^R01, RDE^O11) over SFTP, the file_export transport. time_zone
+	// reads times without an offset (without it they are refused);
+	// sending_facility, when set, refuses a file with another facility's
+	// message; the MRN is the PID-3 repetition of mrn_identifier_type (and
+	// mrn_assigning_authority), kept under mrn_namespace; without the type
+	// and namespace no MRN is stored. access_key is the SSH private key.
+	{ID: "hl7v2_file", Label: "HL7 v2 message files", Summary: "Reads HL7 v2 result and medication messages from files in a secure folder.",
+		Version: 1, built: true, Fields: []Field{
+			{Key: "folder", Label: "Folder", Kind: KindText, Required: true, Max: 200},
+			{Key: "username", Label: "User name", Kind: KindText, Required: true, Max: 32},
+			{Key: "host_key_fingerprint", Label: "Host key fingerprint", Kind: KindText, Required: true, Max: 100},
+			{Key: "expected_every_minutes", Label: "Expected every (minutes)", Kind: KindText, Required: true, Max: 6},
+			{Key: "time_zone", Label: "Time zone for times without an offset", Kind: KindText, Max: 64},
+			{Key: "sending_facility", Label: "Sending facility (MSH-4)", Kind: KindText, Max: 60},
+			{Key: "mrn_namespace", Label: "MRN identifier system", Kind: KindText, Max: 200},
+			{Key: "mrn_identifier_type", Label: "MRN identifier type (PID-3.5)", Kind: KindText, Max: 5},
+			{Key: "mrn_assigning_authority", Label: "MRN assigning authority (PID-3.4)", Kind: KindText, Max: 60},
+			{Key: "access_key", Label: "Access key", Kind: KindSecret, Required: true, Max: 4000},
+		}},
 	// stub: the development connector (plan Task 9). It calls nothing.
 	{ID: "stub", Label: "Test connection", Summary: "A development connection that reads nothing.",
 		Version: 1, built: true, development: true, Fields: []Field{
