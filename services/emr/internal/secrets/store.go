@@ -4,8 +4,8 @@
 //
 // FileStore is for the demo (APP_ENV development or staging, synthetic
 // credentials): one file per secret version, 0400, in 0700 directories on
-// a volume only the emr container mounts. Production needs the managed
-// store (Task 12, waiting on H3); the file store refuses it.
+// a volume only the emr container mounts. Production needs OpenBao
+// (Task 12, H3: openbao.go); the file store refuses it.
 package secrets
 
 import (

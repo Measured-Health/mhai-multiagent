@@ -208,3 +208,87 @@ func TestNATSTLSFiles(t *testing.T) {
 		t.Fatalf("development, all three: %+v %v", s, err)
 	}
 }
+
+// The secret store (plan Task 12, H3): production takes OpenBao only;
+// development and staging either. The errors name the variable only.
+func TestSecretStoreSettings(t *testing.T) {
+	bao := func(m map[string]string) map[string]string {
+		m["EMR_SECRET_STORE"] = "openbao"
+		m["EMR_OPENBAO_ADDR"] = "https://openbao:8200"
+		m["EMR_OPENBAO_CA_FILE"] = "/run/tls/ca.pem"
+		m["EMR_OPENBAO_CLIENT_CERT_FILE"] = "/run/tls/emr.pem"
+		m["EMR_OPENBAO_CLIENT_KEY_FILE"] = "/run/tls/emr-key.pem"
+		m["EMR_OPENBAO_CREDENTIALS_FILE"] = "/run/secrets/openbao-emr.json"
+		return m
+	}
+	if s, err := FromEnv(env(bao(prodEnv()))); err != nil || s.SecretStore != "openbao" {
+		t.Fatalf("production with openbao: %+v %v", s, err)
+	}
+	m := prodEnv()
+	if s, err := FromEnv(env(m)); err != nil || s.SecretStore != "none" {
+		t.Fatalf("production with no store: %+v %v", s, err)
+	}
+	for _, e := range []func() map[string]string{devEnv, func() map[string]string { m := prodEnv(); m["APP_ENV"] = "staging"; return m }} {
+		m := e()
+		m["EMR_SECRETS_DIR"] = "/emr-secrets"
+		if s, err := FromEnv(env(m)); err != nil || s.SecretStore != "file" {
+			t.Fatalf("%s with the file store: %+v %v", m["APP_ENV"], s, err)
+		}
+		if s, err := FromEnv(env(bao(e()))); err != nil || s.SecretStore != "openbao" {
+			t.Fatalf("%s with openbao: %+v %v", m["APP_ENV"], s, err)
+		}
+	}
+	// Development may leave out the client certificate.
+	d := bao(devEnv())
+	delete(d, "EMR_OPENBAO_CLIENT_CERT_FILE")
+	delete(d, "EMR_OPENBAO_CLIENT_KEY_FILE")
+	if _, err := FromEnv(env(d)); err != nil {
+		t.Fatalf("development without a client certificate: %v", err)
+	}
+	const secret = "syntheticCredentialInTheUrl0123"
+	for _, tc := range []struct {
+		name string
+		edit func(m map[string]string)
+		want string
+	}{
+		{"file store in production", func(m map[string]string) {
+			for k := range bao(map[string]string{}) {
+				delete(m, k)
+			}
+			m["EMR_SECRETS_DIR"] = "/emr-secrets"
+		}, "EMR_SECRET_STORE=openbao"},
+		{"file named in production", func(m map[string]string) {
+			for k := range bao(map[string]string{}) {
+				delete(m, k)
+			}
+			m["EMR_SECRET_STORE"] = "file"
+			m["EMR_SECRETS_DIR"] = "/emr-secrets"
+		}, "EMR_SECRET_STORE=openbao"},
+		{"both stores", func(m map[string]string) { m["EMR_SECRETS_DIR"] = "/emr-secrets" }, "EMR_SECRETS_DIR"},
+		{"plain http", func(m map[string]string) { m["EMR_OPENBAO_ADDR"] = "http://openbao:8200" }, "EMR_OPENBAO_ADDR"},
+		{"credentials in the address", func(m map[string]string) {
+			m["EMR_OPENBAO_ADDR"] = "https://emr:" + secret + "@openbao:8200"
+		}, "EMR_OPENBAO_ADDR"},
+		{"a path", func(m map[string]string) { m["EMR_OPENBAO_ADDR"] = "https://openbao:8200/v1" }, "EMR_OPENBAO_ADDR"},
+		{"no CA", func(m map[string]string) { delete(m, "EMR_OPENBAO_CA_FILE") }, "EMR_OPENBAO_CA_FILE"},
+		{"no credentials", func(m map[string]string) { delete(m, "EMR_OPENBAO_CREDENTIALS_FILE") }, "EMR_OPENBAO_CREDENTIALS_FILE"},
+		{"no client certificate", func(m map[string]string) {
+			delete(m, "EMR_OPENBAO_CLIENT_CERT_FILE")
+			delete(m, "EMR_OPENBAO_CLIENT_KEY_FILE")
+		}, "EMR_OPENBAO_CLIENT_CERT_FILE"},
+		{"half a client certificate", func(m map[string]string) { delete(m, "EMR_OPENBAO_CLIENT_KEY_FILE") }, "EMR_OPENBAO_CLIENT_KEY_FILE"},
+		{"unknown store", func(m map[string]string) { m["EMR_SECRET_STORE"] = "vault" }, "EMR_SECRET_STORE"},
+		{"openbao settings without the store", func(m map[string]string) { delete(m, "EMR_SECRET_STORE") }, "EMR_OPENBAO_"},
+	} {
+		m := bao(prodEnv())
+		tc.edit(m)
+		_, err := FromEnv(env(m))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v (want %s)", tc.name, err, tc.want)
+			continue
+		}
+		if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "/run/") {
+			t.Errorf("%s: the error names a value: %v", tc.name, err)
+		}
+	}
+}

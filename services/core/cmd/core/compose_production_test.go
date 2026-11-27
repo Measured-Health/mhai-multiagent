@@ -196,3 +196,78 @@ func TestDeployShipsProductionAndEMR(t *testing.T) {
 		t.Error("emr/emr.sh must be gated on EMR_ENABLED=true and read the start line with grep >/dev/null")
 	}
 }
+
+// OpenBao, the emr service's secret store (deploy/compose.openbao.yml; H3):
+// pinned by digest (the same one the emr service's integration test runs),
+// non-root, read-only, no capabilities, no published port, on its own
+// internal network only, which nothing but emr shares; emr runs as
+// production with it, its file store off; the server wants a client
+// certificate; the deploy ships every file and the emr step warns, never
+// fails, when it is sealed.
+func TestOpenBaoOverlay(t *testing.T) {
+	c := loadComposeAs(t, filepath.Join("deploy", "compose.openbao.yml"))
+	ob, ok := c.Services["openbao"]
+	if !ok || len(c.Services) != 2 {
+		t.Fatalf("compose.openbao.yml services %v, want openbao and emr", c.Services)
+	}
+	digest := strings.TrimSuffix(ob.Image[strings.LastIndex(ob.Image, "@")+1:], "}")
+	if !strings.Contains(ob.Image, "@sha256:") || len(digest) != len("sha256:")+64 {
+		t.Errorf("openbao image %q is not pinned by digest", ob.Image)
+	}
+	if !strings.Contains(readRepoFile(t, filepath.Join("services", "emr", "internal", "secrets", "openbao_integration_test.go")), digest) {
+		t.Error("the emr service's OpenBao integration test runs another image than the deploy")
+	}
+	if ob.User == "" || strings.HasPrefix(ob.User, "0") || !ob.ReadOnly || !slices.Equal(ob.CapDrop, []string{"ALL"}) ||
+		len(ob.Ports) != 0 || !slices.Contains(ob.SecurityOpt, "no-new-privileges:true") || ob.MemLimit == "" ||
+		!slices.Equal(ob.Profiles, []string{"emr"}) {
+		t.Errorf("openbao hardening: %+v", ob)
+	}
+	if !slices.Equal(ob.networkNames(), []string{"openbao"}) || !c.Networks["openbao"].Internal {
+		t.Errorf("openbao networks %v (internal %v)", ob.networkNames(), c.Networks["openbao"].Internal)
+	}
+	for _, v := range ob.Volumes {
+		if !strings.HasPrefix(v, "openbao-data:") && !strings.HasSuffix(v, ":ro") {
+			t.Errorf("openbao mounts %q writable", v)
+		}
+	}
+	for name, s := range loadDeployCompose(t).Services {
+		if slices.Contains(s.networkNames(), "openbao") {
+			t.Errorf("%s is on the openbao network in compose.yml", name)
+		}
+	}
+	emr := c.Services["emr"]
+	if emr.Environment["APP_ENV"] != "production" || emr.Environment["EMR_SECRET_STORE"] != "openbao" ||
+		emr.Environment["EMR_SECRETS_DIR"] != "" || !strings.HasPrefix(emr.Environment["EMR_OPENBAO_ADDR"], "https://openbao:") ||
+		emr.Environment["EMR_OPENBAO_CLIENT_CERT_FILE"] == "" {
+		t.Errorf("emr with OpenBao: %v", emr.Environment)
+	}
+	if !slices.Contains(emr.networkNames(), "openbao") {
+		t.Error("emr is not on the openbao network")
+	}
+	hcl := readRepoFile(t, filepath.Join("deploy", "openbao", "openbao.hcl"))
+	for _, want := range []string{"tls_require_and_verify_client_cert = true", `tls_min_version                    = "tls13"`,
+		`address                                  = "127.0.0.1:8201"`, `audit "file"`} {
+		if !strings.Contains(hcl, want) {
+			t.Errorf("openbao.hcl lacks %q", want)
+		}
+	}
+	if strings.Count(hcl, "disable_unauthed_generate_root_endpoints = false") != 1 {
+		t.Error("root generation by key shares must be on the loopback listener only")
+	}
+	wf := readRepoFile(t, filepath.Join(".github", "workflows", "deploy.yml"))
+	for _, f := range []string{"compose.openbao.yml", "openbao/openbao.hcl", "openbao/emr-policy.hcl", "openbao/backup-policy.hcl",
+		"openbao/configure.sh", "openbao/enable-openbao.sh"} {
+		if !strings.Contains(wf, f) {
+			t.Errorf("deploy.yml does not ship %s", f)
+		}
+	}
+	sh := readRepoFile(t, filepath.Join("deploy", "emr", "emr.sh"))
+	if !strings.Contains(sh, "OpenBao is sealed") || !strings.Contains(sh, "enable-openbao.sh --unseal") {
+		t.Error("emr/emr.sh must warn (not fail) when OpenBao is sealed")
+	}
+	for _, f := range []string{"openbao/enable-openbao.sh", "emr/emr.sh"} {
+		if strings.Contains(readRepoFile(t, filepath.Join("deploy", f)), "| grep -q") {
+			t.Errorf("deploy/%s pipes into grep -q", f)
+		}
+	}
+}

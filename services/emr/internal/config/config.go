@@ -41,8 +41,17 @@ type Settings struct {
 	// private keys (seal-<kid>.key, from emr keys seal-init; two during a
 	// rotation, design §6.3).
 	SealKeyPath string
+	// SecretStore is EMR_SECRET_STORE: file, openbao or none. Unset is file
+	// when EMR_SECRETS_DIR is set, none otherwise. Production takes
+	// openbao only (plan Task 12, H3); development and staging either.
+	SecretStore string
 	// SecretsDir is EMR_SECRETS_DIR, the file secret store (PR 3).
 	SecretsDir string
+	// OpenBao is EMR_OPENBAO_ADDR (https://host:port), EMR_OPENBAO_CA_FILE,
+	// EMR_OPENBAO_CLIENT_CERT_FILE and EMR_OPENBAO_CLIENT_KEY_FILE (this
+	// service's client certificate, required outside development) and
+	// EMR_OPENBAO_CREDENTIALS_FILE (the AppRole role_id and secret_id).
+	OpenBaoAddr, OpenBaoCAFile, OpenBaoCertFile, OpenBaoKeyFile, OpenBaoCredentialsFile string
 	// ProxyURL, ProxyKeyPath and EgressDir are EMR_PROXY_URL,
 	// EMR_PROXY_KEY_PATH and EMR_EGRESS_DIR: egress-emr, its K_proxy key
 	// and the directory the allow-list is written to (PR 4); all or none.
@@ -86,22 +95,28 @@ var ruleSetName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 func FromEnv(getenv func(string) string) (Settings, error) {
 	get := func(k string) string { return strings.TrimSpace(getenv(k)) }
 	s := Settings{
-		Env:             get("APP_ENV"),
-		NATSURL:         get("EMR_NATS_URL"),
-		NATSNKeyFile:    get("EMR_NATS_NKEY_FILE"),
-		NATSPassword:    getenv("EMR_NATS_PASSWORD"),
-		DatabaseURL:     get("EMR_DATABASE_URL"),
-		TrustedKeysPath: get("EMR_TRUSTED_KEYS_PATH"),
-		SealKeyPath:     get("EMR_SEAL_KEY_PATH"),
-		SecretsDir:      get("EMR_SECRETS_DIR"),
-		ProxyURL:        get("EMR_PROXY_URL"),
-		ProxyKeyPath:    get("EMR_PROXY_KEY_PATH"),
-		EgressDir:       get("EMR_EGRESS_DIR"),
-		RuleSetActive:   get("EMR_RULE_SET_ACTIVE"),
-		RuleSetFile:     get("EMR_RULE_SET_FILE"),
-		CodesDir:        get("EMR_CODES_DIR"),
-		MapsDir:         get("EMR_MAPS_DIR"),
-		DevCAFile:       get("EMR_DEV_CA_FILE"),
+		Env:                    get("APP_ENV"),
+		NATSURL:                get("EMR_NATS_URL"),
+		NATSNKeyFile:           get("EMR_NATS_NKEY_FILE"),
+		NATSPassword:           getenv("EMR_NATS_PASSWORD"),
+		DatabaseURL:            get("EMR_DATABASE_URL"),
+		TrustedKeysPath:        get("EMR_TRUSTED_KEYS_PATH"),
+		SealKeyPath:            get("EMR_SEAL_KEY_PATH"),
+		SecretStore:            get("EMR_SECRET_STORE"),
+		SecretsDir:             get("EMR_SECRETS_DIR"),
+		OpenBaoAddr:            get("EMR_OPENBAO_ADDR"),
+		OpenBaoCAFile:          get("EMR_OPENBAO_CA_FILE"),
+		OpenBaoCertFile:        get("EMR_OPENBAO_CLIENT_CERT_FILE"),
+		OpenBaoKeyFile:         get("EMR_OPENBAO_CLIENT_KEY_FILE"),
+		OpenBaoCredentialsFile: get("EMR_OPENBAO_CREDENTIALS_FILE"),
+		ProxyURL:               get("EMR_PROXY_URL"),
+		ProxyKeyPath:           get("EMR_PROXY_KEY_PATH"),
+		EgressDir:              get("EMR_EGRESS_DIR"),
+		RuleSetActive:          get("EMR_RULE_SET_ACTIVE"),
+		RuleSetFile:            get("EMR_RULE_SET_FILE"),
+		CodesDir:               get("EMR_CODES_DIR"),
+		MapsDir:                get("EMR_MAPS_DIR"),
+		DevCAFile:              get("EMR_DEV_CA_FILE"),
 		NATSTLS: natstls.Files{CA: get("EMR_NATS_TLS_CA_FILE"), Cert: get("EMR_NATS_TLS_CERT_FILE"),
 			Key: get("EMR_NATS_TLS_KEY_FILE")},
 	}
@@ -157,6 +172,7 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 			errs = append(errs, errors.New("EMR_PROXY_URL must be http://host:port, with no credentials"))
 		}
 	}
+	errs = append(errs, s.checkStore()...)
 	if (s.CodesDir == "") != (s.MapsDir == "") {
 		errs = append(errs, errors.New("set both EMR_CODES_DIR and EMR_MAPS_DIR, or neither"))
 	}
@@ -188,6 +204,59 @@ func FromEnv(getenv func(string) string) (Settings, error) {
 		return Settings{}, err
 	}
 	return s, nil
+}
+
+// checkStore checks the secret store's settings and fills SecretStore.
+func (s *Settings) checkStore() []error {
+	var errs []error
+	openbao := s.OpenBaoAddr != "" || s.OpenBaoCAFile != "" || s.OpenBaoCertFile != "" || s.OpenBaoKeyFile != "" ||
+		s.OpenBaoCredentialsFile != ""
+	if s.SecretStore == "" {
+		s.SecretStore = "none"
+		if s.SecretsDir != "" {
+			s.SecretStore = "file"
+		}
+	}
+	switch s.SecretStore {
+	case "none":
+		if openbao {
+			errs = append(errs, errors.New("EMR_OPENBAO_* are set but EMR_SECRET_STORE is not openbao"))
+		}
+	case "file":
+		if s.SecretsDir == "" {
+			errs = append(errs, errors.New("EMR_SECRET_STORE=file needs EMR_SECRETS_DIR"))
+		}
+		if s.Env == "production" {
+			errs = append(errs, errors.New("the file secret store (EMR_SECRETS_DIR) is for development and staging; production needs EMR_SECRET_STORE=openbao"))
+		}
+		if openbao {
+			errs = append(errs, errors.New("EMR_OPENBAO_* are set but EMR_SECRET_STORE is file"))
+		}
+	case "openbao":
+		if s.SecretsDir != "" {
+			errs = append(errs, errors.New("EMR_SECRETS_DIR must be empty with EMR_SECRET_STORE=openbao (one store)"))
+		}
+		u, err := url.Parse(s.OpenBaoAddr)
+		if s.OpenBaoAddr == "" || err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil ||
+			(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+			errs = append(errs, errors.New("EMR_OPENBAO_ADDR must be https://host:port, with no credentials or path"))
+		}
+		if s.OpenBaoCAFile == "" {
+			errs = append(errs, errors.New("EMR_OPENBAO_CA_FILE is required with EMR_SECRET_STORE=openbao"))
+		}
+		if s.OpenBaoCredentialsFile == "" {
+			errs = append(errs, errors.New("EMR_OPENBAO_CREDENTIALS_FILE is required with EMR_SECRET_STORE=openbao"))
+		}
+		switch {
+		case (s.OpenBaoCertFile == "") != (s.OpenBaoKeyFile == ""):
+			errs = append(errs, errors.New("EMR_OPENBAO_CLIENT_CERT_FILE and EMR_OPENBAO_CLIENT_KEY_FILE must be set together"))
+		case s.OpenBaoCertFile == "" && !s.Development():
+			errs = append(errs, errors.New("EMR_OPENBAO_CLIENT_CERT_FILE and EMR_OPENBAO_CLIENT_KEY_FILE are required outside development (OpenBao verifies a client certificate)"))
+		}
+	default:
+		errs = append(errs, errors.New("EMR_SECRET_STORE must be file, openbao or none"))
+	}
+	return errs
 }
 
 // checkNATSURL: nats:// or tls:// (tls:// only outside development), a

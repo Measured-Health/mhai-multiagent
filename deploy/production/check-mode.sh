@@ -26,6 +26,7 @@ need=(nats postgres core)
 [ "$(env_get NOTIFY_ENABLED)" != true ] || need+=(notifications)
 [ "$(env_get PIPELINE_ENABLED)" != true ] || need+=(pipeline)
 [ "$(env_get EMR_ENABLED)" != true ] || need+=(emr)
+[ "$(env_get OPENBAO_ENABLED)" != true ] || need+=(openbao)
 for f in compose.production.yml nats/tls.conf postgres/pg_hba.production.conf tls/public/ca.pem; do
   [ -f "$f" ] || die "$f is missing: run production/enable-production.sh"
 done

@@ -12,7 +12,7 @@ import (
 )
 
 const usage = "usage: emr serve | emr keys seal-init --out <dir> | emr keys proxy-init --out <dir> | emr unmapped --hospital <id> --connection <id> |\n" +
-	"       emr rules check <rule set file> |\n" +
+	"       emr rules check <rule set file> | emr secrets ready | emr secrets move-from-file --dir <file store> --env staging|development |\n" +
 	"       emr synth-fhir --name <dns name> --out <dir> [--addr :8443] [--seed 1] [--patients 20] [--late-critical 3m]   (development only)"
 
 func main() {
@@ -38,6 +38,11 @@ func run(args []string, getenv func(string) string, out io.Writer) error {
 		return unmappedCmd(getenv, args[2], args[4], out)
 	case len(args) == 3 && args[0] == "rules" && args[1] == "check" && args[2] != "":
 		return rulesCheck(args[2], getenv, out)
+	case len(args) == 2 && args[0] == "secrets" && args[1] == "ready":
+		return secretsReady(getenv, out)
+	case len(args) == 6 && args[0] == "secrets" && args[1] == "move-from-file" && args[2] == "--dir" && args[3] != "" &&
+		args[4] == "--env":
+		return moveFromFile(getenv, args[3], args[5], out)
 	case len(args) >= 1 && args[0] == "synth-fhir":
 		return synthFHIR(args[1:], getenv, out)
 	default:

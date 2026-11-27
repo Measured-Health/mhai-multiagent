@@ -123,19 +123,30 @@ func loadSealKeys(dir string) (seal.Keys, error) {
 	return keys, nil
 }
 
-// openStore opens the secret store: the file store at EMR_SECRETS_DIR, never
-// in production (the managed store, plan Task 12, waits on H3). With no
-// directory there is no store: the credential ops answer nothing (core
-// shows not_ready) and health reports the store not ready.
-func openStore(dir, env string) (*secrets.FileStore, error) {
-	if dir == "" {
+// openStore opens the secret store EMR_SECRET_STORE names (config.FromEnv
+// checked the settings): OpenBao (production's only store; H3, plan Task
+// 12) or the file store at EMR_SECRETS_DIR (development and staging). With
+// none the credential ops answer nothing (core shows not_ready) and health
+// reports the store not ready. OpenBao is not reached here: sealed or
+// down, the service starts and the store fails closed (ErrStore).
+func openStore(s config.Settings) (secrets.Store, error) {
+	switch s.SecretStore {
+	case "openbao":
+		st, err := secrets.NewOpenBao(secrets.OpenBaoConfig{Addr: s.OpenBaoAddr, CAFile: s.OpenBaoCAFile,
+			CertFile: s.OpenBaoCertFile, KeyFile: s.OpenBaoKeyFile, CredentialsFile: s.OpenBaoCredentialsFile, Env: s.Env})
+		if err != nil {
+			return nil, errors.New("EMR_OPENBAO_*: the address, the CA or the client certificate is not usable")
+		}
+		return st, nil
+	case "file":
+		st, err := secrets.NewFileStore(s.SecretsDir, s.Env)
+		if err != nil {
+			return nil, errors.New("EMR_SECRETS_DIR: the file store is for development and staging, in a 0700 directory of this user")
+		}
+		return st, nil
+	default:
 		return nil, nil
 	}
-	s, err := secrets.NewFileStore(dir, env)
-	if err != nil {
-		return nil, errors.New("EMR_SECRETS_DIR: the file store is for development and staging, in a 0700 directory of this user")
-	}
-	return s, nil
 }
 
 func serve(getenv func(string) string) error {
@@ -152,7 +163,7 @@ func serve(getenv func(string) string) error {
 	if err != nil {
 		return err
 	}
-	store, err := openStore(s.SecretsDir, s.Env)
+	store, err := openStore(s)
 	if err != nil {
 		return err
 	}
@@ -330,7 +341,7 @@ func serve(getenv func(string) string) error {
 	}
 	defer stopCtl()
 	log.Info("emr serving", "env", s.Env, "subjects", ctl.Subjects, "rule_set_active", s.RuleSetActive != "",
-		"secret_store", store != nil, "sealing_keys", len(sealKeys), "egress", writer != nil, "normaliser", normaliser, "rules", ruleSet != "",
+		"secret_store", s.SecretStore, "sealing_keys", len(sealKeys), "egress", writer != nil, "normaliser", normaliser, "rules", ruleSet != "",
 		"polling", polling)
 	<-ctx.Done()
 	return nil

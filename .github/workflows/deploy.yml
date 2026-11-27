@@ -232,8 +232,8 @@ jobs:
           # swap-model.sh's policy files (gpu-model/lock/): the repository's, at this commit.
           mkdir -p deploy/gpu-model/lock
           cp models/testsets.lock models/licences.json models/approved-datasets.json deploy/gpu-model/lock/
-          # Production mode and the EMR (deploy/README.md, "Production mode",
-          # "EMR integration"): the overlays, NATS's TLS config, Postgres's
+          # Production mode, the EMR and OpenBao (deploy/README.md, "Production
+          # mode", "EMR integration", "OpenBao (the EMR secret store)"): the overlays, NATS's TLS config, Postgres's
           # client rules and the scripts, so a host in production mode always
           # runs this commit's copies (COMPOSE_FILE in its .env names them).
           b=$(tar -C deploy -czf - compose.yml compose.production.yml compose.emr.yml nats/nats.conf nats/tls.conf \
@@ -241,7 +241,8 @@ jobs:
             notifications/enable-notifications.sh gpu-model/entrypoint.sh gpu-model/gpu-model.sh \
             gpu-model/swap-model.sh gpu-model/builder/Dockerfile gpu-model/builder/merge.py gpu-model/lock pilot/pipeline.sh \
             production/enable-production.sh production/prod-lib.sh production/check-mode.sh emr/enable-emr.sh emr/emr.sh \
-            tls/make-ca.sh tls/issue.sh tls/split-lib.sh | base64 -w0)
+            compose.openbao.yml openbao/openbao.hcl openbao/emr-policy.hcl openbao/backup-policy.hcl openbao/configure.sh \
+            openbao/enable-openbao.sh tls/make-ca.sh tls/issue.sh tls/split-lib.sh | base64 -w0)
           echo "value=$b" >> "$GITHUB_OUTPUT"
 
       # Without a host-key check the SSH step would trust whatever answers at
