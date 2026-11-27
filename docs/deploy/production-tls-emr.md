@@ -1,7 +1,7 @@
 # Production mode (TLS) and the EMR on the single-host backend
 
-Status: built and rehearsed on the build server (27 Nov 2026); not yet run on
-the live host. Operator steps: deploy/README.md, "Production mode" and "EMR
+Status: built and rehearsed on the build server (27 Nov 2026); production
+mode switched on on the live host on 27 Nov 2026. Operator steps: deploy/README.md, "Production mode" and "EMR
 integration".
 
 ## What changes
