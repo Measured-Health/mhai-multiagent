@@ -1,0 +1,37 @@
+# The MHAI HL7 bridge, as the hospital runs it (README.md here). Copy this
+# file and bridge.env to the bridge host, set the values in bridge.env,
+# put MHAI's public key in ./authorized_key, then: docker compose up -d
+name: mhai-hl7-bridge
+services:
+  hl7-bridge:
+    image: ghcr.io/measured-health/mhai-hl7-bridge:${BRIDGE_VERSION:?set BRIDGE_VERSION to the version MHAI gave you}
+    restart: unless-stopped
+    env_file: bridge.env
+    environment:
+      HL7_BRIDGE_AUTHORIZED_KEY: /run/mhai/authorized_key
+      HL7_BRIDGE_HEALTH_ADDR: 0.0.0.0:8080
+    ports:
+      # MLLP from the interface engine: bind to the LAN address the engine
+      # uses, never 0.0.0.0 on a host with a public interface.
+      - "${BRIDGE_LAN_IP:?set BRIDGE_LAN_IP}:2575:2575"
+      # SFTP for MHAI: published as port 22 (MHAI connects to port 22 only),
+      # firewalled to MHAI's egress address or reached over the VPN.
+      - "${BRIDGE_SFTP_IP:?set BRIDGE_SFTP_IP}:22:2222"
+      # Health, on this host only.
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - spool:/spool
+      - state:/state
+      - ./authorized_key:/run/mhai/authorized_key:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "5"}
+volumes:
+  spool: {}
+  state: {}

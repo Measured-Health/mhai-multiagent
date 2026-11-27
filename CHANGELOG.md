@@ -17,6 +17,12 @@ All notable changes to this project are documented here. The format follows
   `hl7v2_file` (additive). Design
   `docs/designs/2026-11-27-hl7v2-file-connector-and-bridge.md`, ADR 0019.
   Off until `hl7v2_file` is in `CORE_EMR_CONNECTOR_TYPES`.
+- **The on-site HL7 bridge (`hl7-bridge`).** For a hospital whose interface
+  engine can only push HL7 v2 over MLLP: it runs next to the engine,
+  acknowledges each message only once it is on disk, and serves
+  `hl7v2_file` files over its own key-only SFTP server, so MHAI still only
+  pulls. Image `services/emr/Dockerfile.hl7-bridge`, compose example and
+  install guide in `deploy/hl7-bridge/`.
 
 ### Changed
 

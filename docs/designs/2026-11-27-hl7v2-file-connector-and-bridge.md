@@ -169,14 +169,14 @@ A single Go binary, `hl7-bridge` (`services/emr/cmd/hl7-bridge`, code in `servic
 ### 4.2 The spool
 
 - One open file, `hl7-<UTC time>-<seq>.hl7.part`, beginning with FHS and BHS. Each accepted message is appended whole. The file is closed (BTS with the message count, FTS, `fsync`, rename to `.hl7`, `fsync` of the folder) every `HL7_BRIDGE_ROTATE` (default 1 minute) when it holds a message, or at 10,000 messages or 40 MB. The connector never reads a `.part` file.
-- **Crash recovery:** the duplicate log also records each message's end offset in its file. At start, a `.part` file is cut back to the last offset recorded (a message written but not logged was never acknowledged) and closed.
+- **Crash recovery:** the duplicate log also records each message's end offset in its file. At start, a `.part` file is cut back to the last offset recorded (a message written but not logged was never acknowledged) and closed. A `.part` file holding no recorded message (only its header) is removed: nothing in it was ever acknowledged.
 - **Where:** `/spool` (a volume), mode 0700, owned by the bridge's non-root user. The SFTP view of it is `hl7/`, `hl7/processed/`, `hl7/rejected/`.
 
 ### 4.3 The built-in SFTP server
 
 - SSH with **public-key sign-in only**: the authorised key is the public half of the key the platform admin saved as the connection's `access_key` (a file the hospital IT installs, `HL7_BRIDGE_AUTHORIZED_KEY`), one user name (`HL7_BRIDGE_SFTP_USER`). No password, keyboard-interactive or agent forwarding; no shell, exec, port forwarding or other channel than the `sftp` subsystem.
 - **Host key:** an Ed25519 key made at first start in `/state` (0600). `hl7-bridge fingerprint` prints its `SHA256:` fingerprint, which the hospital gives the platform admin out of band for `host_key_fingerprint`.
-- **What a client may do, and nothing else:** list and stat inside `hl7/` and its two subfolders; open a closed `.hl7` file for reading; rename a file from `hl7/` into `hl7/processed/` or `hl7/rejected/` (never over a file). No write, create, delete, mkdir, rmdir, symlink, setstat or rename anywhere else. Every path is cleaned and resolved under the spool root; `..`, absolute escapes, NUL, and symlinks are refused (the server never follows one).
+- **What a client may do, and nothing else:** list and stat inside `hl7/` and its two subfolders; open a closed `.hl7` file for reading; rename a file from `hl7/` into `hl7/processed/` or `hl7/rejected/`, under its own name or the connector's `.<digits>` suffix, never over a file (the server links then unlinks, so even the `posix-rename` extension can't replace a file). No write, create, delete, mkdir, rmdir, symlink, setstat or rename anywhere else. Every path is cleaned and resolved under the spool root; `..`, absolute escapes, NUL, and symlinks are refused (the server never follows one).
 - **Allow-list:** `HL7_BRIDGE_SFTP_ALLOW` (CIDRs, required): our egress address(es), or the VPN range (H7).
 - Sign-in attempts are rate-limited (10 a minute per source address) and at most 4 sessions at once.
 
@@ -287,6 +287,8 @@ Part B (bridge):
 - **A sender inside the allowed LAN range can forge messages** to the bridge, as to any HL7 receiver. Mutual TLS closes it where the engine supports it; recommended, not required, because many engines don't.
 - **Disk encryption on the bridge host is the hospital's to set up.** We can't verify it from the container; the install guide makes it a checklist item the hospital confirms in writing before go-live (privacy sign-off).
 - **The bridge's SFTP port is reachable from the internet** (firewalled to our egress address) unless the hospital uses the VPN route (H7). Key-only auth, pinned host key, allow-list and rate limits are the controls; the VPN is preferred.
+- **The bridge's received log is compacted to the 7-day window only at start** (about 110 bytes a message); a bridge that runs for months without a restart keeps a larger log. It holds digests, file names and offsets, never content. Periodic compaction is a follow-up.
+- **A sender inside the MLLP allow-list can hold connections** (at most 16, each closed after a frame's worth of junk, 5 idle minutes, or 2 minutes per frame).
 - **Locally coded vital signs read as laboratory** until mapped (§3.4); only unmapped-category source flags are affected.
 - **Clinical sign-off:** the OBX-11 status map and the vital-sign LOINC set are clinical logic (they decide what can alert); both follow HL7's published v2-to-FHIR map and FHIR's vital-signs profile, and go to the clinical reviewer with this PR (`clinical-review` label).
 - **TODO.md:** the deploy steps of §9; MLLP on our side (§8).

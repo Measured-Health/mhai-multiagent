@@ -652,3 +652,26 @@ func Complete(data []byte) bool {
 	}
 	return true
 }
+
+// ParseHeader reads only the first segment of data as an MSH, leniently:
+// for answering a message that ParseMessage refused (the bridge's AE or AR
+// acknowledgement). ok is false when there is no readable MSH at all. The
+// header's values must still be cleaned before they are echoed.
+func ParseHeader(data []byte) (*Message, bool) {
+	s := string(data)
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > MaxSegment || !strings.HasPrefix(s, "MSH") {
+		return nil, false
+	}
+	d, ok := delimsOf(s)
+	if !ok {
+		return nil, false
+	}
+	f, ok := splitFields(s, d, true)
+	if !ok {
+		return nil, false
+	}
+	return &Message{D: d, Charset: CharsetASCII, Segs: []Segment{{ID: "MSH", F: f}}}, true
+}
