@@ -36,9 +36,11 @@ func (k activityKind) Type() string { return k.typ }
 func (k activityKind) Kind() string { return k.kind }
 
 // ActivityActions maps each action Activity shows to its type and kind.
-// auth.login.succeeded is signed_in, or signed_in_without_mfa without a
-// second factor. Core flags no event today: self role adds are refused
-// (ruling, 14 Nov), so flagged=true answers an empty page.
+// auth.login.succeeded is signed_in, or signed_in_without_mfa for a session
+// issued without a second factor; a two-step sign-in's password step
+// ({mfa_required: true}, no session yet) isn't shown. Core flags no event
+// today: self role adds are refused (ruling, 14 Nov), so flagged=true
+// answers an empty page.
 var ActivityActions = map[string]activityKind{
 	"auth.login.succeeded":              {"sign_in", "signed_in"},
 	"auth.login.locked":                 {"sign_in", "sign_in_locked"},
@@ -245,6 +247,9 @@ func (d Deps) activity(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN users ua ON ua.id = a.actor_id AND ua.hospital_id = a.hospital_id
 		LEFT JOIN users ut ON a.entity = 'user' AND ut.id::text = a.entity_id AND ut.hospital_id = a.hospital_id
 		WHERE a.hospital_id = $1 AND a.action = ANY($2::text[])
+		  -- The password step of a two-step sign-in is not a sign-in yet (no
+		  -- session): its session's row, after the code, is the one shown.
+		  AND NOT (a.action = 'auth.login.succeeded' AND a.payload ? 'mfa_required')
 		  AND a.ts >= $3 AND a.ts < $4
 		  AND ($5::bigint IS NULL OR a.id < $5)
 		  AND ($6::text IS NULL OR a.actor_id::text = $6 OR (a.entity = 'user' AND a.entity_id = $6))
@@ -305,7 +310,9 @@ func toEvent(id int64, at time.Time, action string, actor, target *string, raw [
 	}
 	var payload map[string]any
 	_ = json.Unmarshal(raw, &payload)
-	if mfa, _ := payload["mfa"].(bool); action == "auth.login.succeeded" && !mfa {
+	// Only a session issued without a second factor says so; a row without
+	// the key is never read as one.
+	if mfa, ok := payload["mfa"].(bool); action == "auth.login.succeeded" && ok && !mfa {
 		e.Kind = "signed_in_without_mfa"
 	}
 	return e

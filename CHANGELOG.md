@@ -43,6 +43,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A hospital's Activity showed every two-step sign-in twice, once as
+  "Signed in without two-step".** A two-step sign-in writes
+  `auth.login.succeeded` at the password step (`{mfa_required: true}`, no
+  session yet) and again for the session (`{mfa: true}`). `GET
+  /hospital/activity` read the first as `signed_in_without_mfa` (no `mfa`
+  key), so the hospital admin saw a false "Signed in without two-step (setup
+  pending)" beside each real sign-in. The password step's row is no longer
+  listed, and only a session issued with `mfa: false` is
+  `signed_in_without_mfa`. Found by the whole-journey live check.
+
 - **Deploys no longer fail "the pipeline did not start" on a long-running
   host.** The start checks piped `docker compose logs` into `grep -q`
   under `set -o pipefail`; once the logs were large, `grep -q` exited at
