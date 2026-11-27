@@ -31,6 +31,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Deploys no longer fail "the pipeline did not start" on a long-running
+  host.** The start checks piped `docker compose logs` into `grep -q`
+  under `set -o pipefail`; once the logs were large, `grep -q` exited at
+  the match, the log writer died of SIGPIPE (141) and the whole check
+  counted as failed, so it timed out at 180s with the worker running
+  (seen live 27 Nov). Every such check in deploy/ and deploy.yml now uses
+  a `grep` that reads the whole stream.
 - **A saved action whose message didn't go is no longer "nothing was
   changed" (OpenAPI 1.41.0).** When a hospital admin's action was committed
   but the sender couldn't take its message (seen live: an invite to an

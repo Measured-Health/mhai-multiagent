@@ -156,8 +156,8 @@ docker run -d --name split-nats --network container:split-pg --user 1000:1000 \
   -e NATS_GATEWAY_NKEY="$GW_PUB" -e NATS_BFF_NKEY="$BFF_PUB" -e NATS_BFF_PLATFORM_NKEY="$BFF_PLATFORM_PUB" \
   -e NATS_PIPELINE_NKEY="$PIPE_PUB" -e NATS_NOTIFICATIONS_NKEY=UANAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABKPD -v split-natsconf:/etc/nats:ro --tmpfs /data:uid=1000 \
   "$NATS_IMAGE" "${NATS_CMD[@]}" >/dev/null
-for _ in $(seq 1 30); do docker logs split-nats 2>&1 | grep -q 'Server is ready' && break; sleep 1; done
-docker logs split-nats 2>&1 | grep -q 'Server is ready' || { bad "nats starts with tls.conf"; exit 1; }
+for _ in $(seq 1 30); do docker logs split-nats 2>&1 | grep 'Server is ready' >/dev/null && break; sleep 1; done
+docker logs split-nats 2>&1 | grep 'Server is ready' >/dev/null || { bad "nats starts with tls.conf"; exit 1; }
 ok "nats starts with tls.conf"
 
 echo "== core's one-shots: migrations (they make intelligence_app) and the request key"
