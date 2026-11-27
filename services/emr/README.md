@@ -46,8 +46,15 @@ mode first): on the live host since 27 Nov 2026.
   connector's read-only probe, 20 s.
 - The file secret store (`EMR_SECRETS_DIR`): development and staging only,
   0400 files in 0700 directories owned by the service's user; the previous
-  version is kept 24 hours. Production needs the managed store (plan Task
-  12, waiting on H3). The database holds metadata only (`emr.credentials`).
+  version is kept 24 hours. Production uses OpenBao (plan Task 12, H3;
+  `internal/secrets/openbao.go`). That is KV v2 at `mhai/`, reached over
+  TLS 1.3 with our CA and this service's client certificate. Login is by
+  AppRole, from a 0400 credentials file read again at each login. The
+  policy (`deploy/openbao/emr-policy.hcl`) covers this environment's paths
+  only. Every failure is `ErrStore`: sealed or down, the store fails closed.
+  The database holds metadata only (`emr.credentials`). `emr secrets ready`
+  checks the store, and `emr secrets move-from-file --dir D --env staging`
+  moves the file store's credentials in (idempotent).
 - The connector interface and the development `stub` (registered only with
   `APP_ENV=development`); `Creds` never print, and `TestNoConnectorLogsCreds`
   fails any connector code that hands them to a logger.
@@ -306,7 +313,9 @@ be `hl7v2_file` and gives it the file export's staleness rule.
 | `EMR_DATABASE_URL` | the `emr_app` login (migration 00020, PR 3); `sslmode=verify-full` outside development |
 | `EMR_TRUSTED_KEYS_PATH` | the request-token trusted-keys file core writes (public keys) |
 | `EMR_SEAL_KEY_PATH` | the directory of the sealing private keys (`seal-<kid>.key`) |
+| `EMR_SECRET_STORE` | `openbao`, `file` or `none` (unset: `file` with `EMR_SECRETS_DIR`, else `none`). Production takes `openbao` only |
 | `EMR_SECRETS_DIR` | the file secret store (development and staging only); empty: no store, the credential ops answer nothing |
+| `EMR_OPENBAO_ADDR`, `EMR_OPENBAO_CA_FILE`, `EMR_OPENBAO_CLIENT_CERT_FILE`, `EMR_OPENBAO_CLIENT_KEY_FILE`, `EMR_OPENBAO_CREDENTIALS_FILE` | OpenBao (`https://host:port`), our CA, this service's client certificate (required outside development) and the AppRole credentials file (`{"role_id","secret_id"}`, not readable by group or others) |
 | `EMR_PROXY_URL`, `EMR_PROXY_KEY_PATH`, `EMR_EGRESS_DIR` | egress-emr (`http://host:port`), K_proxy and the allow-list directory: all or none; none means no way out |
 | `EMR_CODES_DIR`, `EMR_MAPS_DIR` | the code tables and the maps (the image has `/codes/testdata` and `/maps`): both or none; none means no normaliser |
 | `EMR_RULE_SET_FILE` | the rule set the rules evaluate (`/rules/ruleset-1.yaml`); needs `EMR_CODES_DIR`; empty: the rules don't run |

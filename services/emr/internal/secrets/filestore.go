@@ -176,6 +176,11 @@ func (s *FileStore) GetVersion(_ context.Context, p Path, version string) (seal.
 	if err != nil {
 		return seal.Secret{}, err
 	}
+	if IsOpenBaoVersion(version) {
+		// OpenBao's (the emr service ran with it, then went back to this
+		// store): not set here, so the connection needs it again.
+		return seal.Secret{}, ErrNotFound
+	}
 	if !versionK.MatchString(version) {
 		return seal.Secret{}, ErrPath
 	}
@@ -248,3 +253,53 @@ func (s *FileStore) DeleteVersionsBefore(ctx context.Context, p Path, keep time.
 
 // Ready checks the root is still the directory it was.
 func (s *FileStore) Ready(context.Context) error { return checkDir(s.dir) }
+
+// Fields lists every path that holds at least one version in this store's
+// environment (the move to OpenBao walks it). Anything in the tree that is
+// not a hospital, connection or field name is skipped.
+func (s *FileStore) Fields(_ context.Context) ([]Path, error) {
+	root := filepath.Join(s.dir, "mhai", s.env, "emr")
+	hs, err := os.ReadDir(root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, ErrStore
+	}
+	var out []Path
+	for _, h := range hs {
+		hid, err := uuid.Parse(h.Name())
+		if err != nil || !h.IsDir() || hid.String() != h.Name() {
+			continue
+		}
+		cs, err := os.ReadDir(filepath.Join(root, h.Name()))
+		if err != nil {
+			return nil, ErrStore
+		}
+		for _, c := range cs {
+			cid, err := uuid.Parse(c.Name())
+			if err != nil || !c.IsDir() || cid.String() != c.Name() {
+				continue
+			}
+			fsd, err := os.ReadDir(filepath.Join(root, h.Name(), c.Name()))
+			if err != nil {
+				return nil, ErrStore
+			}
+			for _, f := range fsd {
+				p := Path{Env: s.env, Hospital: hid, Connection: cid, Field: f.Name()}
+				if !f.IsDir() || !p.valid() {
+					continue
+				}
+				d, _ := s.at(p)
+				vs, err := s.versions(d)
+				if err != nil {
+					return nil, err
+				}
+				if len(vs) > 0 {
+					out = append(out, p)
+				}
+			}
+		}
+	}
+	return out, nil
+}

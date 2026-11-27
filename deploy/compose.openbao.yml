@@ -1,0 +1,86 @@
+# OpenBao, the emr service's secret store (deploy/README.md, "OpenBao (the
+# EMR secret store)"; H3, chosen by the owner on 27 Nov 2026), and the emr
+# service switched to production with it. deploy/openbao/enable-openbao.sh
+# turns it on by appending this file to COMPOSE_FILE in .env, after
+# compose.production.yml and compose.emr.yml; its --disable takes it out
+# again (emr back to staging with the file store).
+#
+#   - openbao: pinned by digest, its own uid (100), read-only root, no
+#     capabilities, no published port, on the internal openbao network only
+#     (shared with the emr service and nothing else). Its data (raft, and
+#     the audit log) on the external volume OPENBAO_VOLUME, so `docker
+#     compose down -v` never takes it; encrypted at rest by OpenBao (the
+#     unseal key shares are off the host). Its server certificate is from
+#     the production CA (tls/openbao, enable-openbao.sh --prepare). It
+#     starts SEALED after any restart: nothing depends on it, and the emr
+#     service reports the store unavailable until an operator unseals it
+#     (enable-openbao.sh --unseal). Its healthcheck is healthy only when
+#     unsealed.
+#   - emr: APP_ENV production, EMR_SECRET_STORE=openbao, its NATS client
+#     certificate (tls/emr) as its OpenBao client certificate, and its
+#     AppRole credentials (secrets/openbao-emr.json, 0400, uid 65532). The
+#     file store's folder stays mounted (the move from it runs in this
+#     container); production refuses to use it.
+
+services:
+  openbao:
+    image: ${OPENBAO_IMAGE:-openbao/openbao:2.7.3@sha256:ba4b133eb9586630024e71a617e66f37f29cc3534cdd46a6233e098ceded8dc9}
+    pull_policy: missing
+    profiles: ["emr"]
+    restart: unless-stopped
+    user: "100:1000"
+    # The server alone: the image's entrypoint wants root to chown and set
+    # capabilities; this runs as its user with none.
+    entrypoint: ["bao"]
+    command: ["server", "-config=/openbao/config/openbao.hcl"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    environment:
+      # For `docker compose exec openbao bao ...` (the operator's loopback
+      # listener; enable-openbao.sh).
+      BAO_ADDR: http://127.0.0.1:8201
+      SKIP_SETCAP: "true"
+      GOMEMLIMIT: 160MiB
+    volumes:
+      - openbao-data:/openbao/file
+      - ./openbao:/openbao/config:ro
+      - ./tls/openbao:/openbao/tls:ro
+    tmpfs:
+      - /tmp
+    mem_limit: 256m
+    pids_limit: 256
+    networks: [openbao]
+    healthcheck:
+      test: ["CMD", "bao", "status", "-address=http://127.0.0.1:8201"]
+      interval: 30s
+      timeout: 5s
+      retries: 1
+      start_period: 10s
+
+  emr:
+    environment:
+      APP_ENV: production
+      EMR_SECRET_STORE: openbao
+      EMR_SECRETS_DIR: ""
+      EMR_OPENBAO_ADDR: https://openbao:8200
+      EMR_OPENBAO_CA_FILE: /run/tls/ca.pem
+      EMR_OPENBAO_CLIENT_CERT_FILE: /run/tls/emr.pem
+      EMR_OPENBAO_CLIENT_KEY_FILE: /run/tls/emr-key.pem
+      EMR_OPENBAO_CREDENTIALS_FILE: /run/secrets/openbao-emr.json
+    volumes:
+      - ./secrets/openbao-emr.json:/run/secrets/openbao-emr.json:ro
+    networks: [backend, emr-proxy, openbao]
+
+networks:
+  # OpenBao and the emr service only, no route out.
+  openbao:
+    internal: true
+
+volumes:
+  openbao-data:
+    external: true
+    name: ${OPENBAO_VOLUME:-mhai-backend-openbao}

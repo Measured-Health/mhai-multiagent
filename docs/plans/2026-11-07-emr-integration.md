@@ -414,15 +414,30 @@ Each task's first step writes its abuse-case tests (A-numbers are the design's, 
 - [ ] **Step 4:** Run core's whole suite, then the cross-service test `TestConnectionLifecycleWithStub` (integration, `-tags integration` in `emrctl`, with the emr binary built from `../emr` and run against the same NATS and Postgres): create, test, switch on, PATCH a secret, PATCH the origin, test again.
 - [ ] **Step 5:** Commit: "Serve the platform connection routes, sealing credentials at core's edge".
 
-### Task 12: The managed secret store (waits on H3)
+### Task 12: The managed secret store (H3: OpenBao, built 27 Nov)
+
+**As built (H3 chose OpenBao, owner, 27 Nov):**
+
+- `internal/secrets/openbao.go`: `secrets.NewOpenBao(OpenBaoConfig)`, KV v2.
+- Tests:
+  - `openbao_test.go`: fails closed, TLS, the credentials file, paths;
+  - `openbao_integration_test.go`: a real OpenBao started from the deploy's
+    own config and `configure.sh`, the file store's contract, the policy's
+    refusals, sealed and unsealed, rotation, the audit log.
+- `deploy/openbao/` and `deploy/compose.openbao.yml`.
+- `deploy/README.md`, "OpenBao (the EMR secret store)".
+
+The departure: there is no `_probe` write at start. The policy allows only
+`<hospital>/<connection>/<field>` paths. Readiness is the server's health
+(unsealed) plus a login and the token's lookup.
 
 **Files:** Create `services/emr/internal/secrets/managed.go`, `managed_test.go` (against the provider's local emulator or a recorded fake transport), `deploy/README.md` section "EMR secrets"
 
 **Interfaces:** `secrets.NewManaged(ctx, provider string, region string) (*Managed, error)` implementing `Store`; path policy documented for the emr identity (`mhai/<env>/emr/*` read, write, delete) and verified at start by a write-read-delete of `mhai/<env>/emr/_probe`; `APP_ENV=production` requires it.
 
-- [ ] **Step 1:** Write `TestManagedStoreContract` (the same contract suite as the file store, shared as `storetest.Run(t, Store)`), `TestProductionRefusesFileStore`.
-- [ ] **Step 2–4:** Run → fail; implement for the provider H3 chose; pass.
-- [ ] **Step 5:** Commit: "Keep EMR secrets in the managed secret store in production".
+- [x] **Step 1:** Write `TestManagedStoreContract` (the same contract suite as the file store, shared as `storetest.Run(t, Store)`), `TestProductionRefusesFileStore`.
+- [x] **Step 2–4:** Run → fail; implement for the provider H3 chose; pass.
+- [x] **Step 5:** Commit: "Keep EMR secrets in the managed secret store in production".
 
 **Off by default after PR 3:** `CORE_EMR_ENABLED=false` and no connector type offered; the routes exist and refuse writes.
 

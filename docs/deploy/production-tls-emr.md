@@ -149,7 +149,8 @@ Boundaries and what is checked at each:
 - No certificate revocation; one-year leaf certificates.
 - The file secret store holds hospital credentials on the host disk (0400,
   0700 folders, not in the backups); losing the disk means re-entering them.
-  Production needs the managed store (H3).
+  Production needs OpenBao, which is now built: deploy/README.md, "OpenBao
+  (the EMR secret store)", with its own threat model.
 - JetStream has one replica (`CORE_ALLOW_SINGLE_NODE`): unchanged.
 - Owner sign-off needed: where the CA key is kept, and the maintenance
   window for the switch (about 25 s of downtime for production mode, up to

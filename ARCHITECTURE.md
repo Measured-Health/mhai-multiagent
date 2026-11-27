@@ -56,6 +56,7 @@ Switching a part on does not sign anything off.
 │    pipeline ─▶ egress-proxy ─▶ cloud provider (masked text; off by default)    │
 │    notifications ─▶ mail-relay ─▶ email provider (SMTP over TLS)               │
 │    emr ─▶ egress-emr ─▶ hospital systems (outbound only, see below)            │
+│    emr ─▶ openbao: the EMR secret store (internal network, emr only)           │
 │                                                                                │
 │  Not deployed: the documents service (section 6).                              │
 └────────────────────────────────────────────────────────────────────────────────┘
@@ -105,6 +106,7 @@ Compose. The backend is in `/srv/mhai-backend` (this repository's
 | `egress-proxy` | profile `cloud` | Squid, the cloud providers' only way out (`CONNECT` to port 443 of the enabled providers only). |
 | `notifications`, `mail-relay` | `NOTIFY_ENABLED=true` (profile `notifications`) | Email. The relay forwards TCP to the one SMTP host; TLS is end to end. |
 | `emr`, `egress-emr` | `EMR_ENABLED=true` (profile `emr`) | The EMR service and its own `CONNECT` proxy. Needs production mode first. |
+| `openbao` | `OPENBAO_ENABLED=true` (profile `emr`, `compose.openbao.yml`) | OpenBao, the store for hospital connection credentials (H3). emr runs as production with it. It starts sealed after a restart: an operator unseals it with 3 of 5 key shares (`openbao/enable-openbao.sh --unseal`). Until then emr fails closed. |
 | clinical app, platform admin app | mhai-web's deploy | Each app's Next.js server (the BFF) behind a small proxy container, behind the host's nginx (TLS, certbot; the platform app also behind an IP allow list). |
 
 The deploy starts each optional service only when its switch is set in
@@ -122,6 +124,9 @@ filesystem, no Linux capabilities and `no-new-privileges`.
   on its own network: `egress` (egress-proxy to cloud providers),
   `mail-egress` (mail-relay to SMTP), `egress-emr` (egress-emr to hospital
   systems). Each proxy refuses everything it was not told to allow.
+- **`openbao`** (internal): OpenBao and the emr service only, with no
+  published port. TLS 1.3 from the production CA, with emr's client
+  certificate required.
 - `edge`: only so core and NATS can publish their loopback ports.
 
 ### 3.3 Production mode (since 27 Nov)
@@ -286,7 +291,9 @@ DocFlow (not built) ◀──────HTTPS───┘
   (`POST /patients/lookup`).
 - **On live: being switched on 27 Nov** with `deploy/emr/enable-emr.sh`
   (after production mode; `--disable` turns it off). The emr service runs as
-  staging: the file secret store is the only one built. Until the real
+  staging with the file secret store until OpenBao is switched on
+  (`deploy/openbao/enable-openbao.sh`, H3). With OpenBao it runs as
+  production. Until the real
   code tables arrive (H6) the normaliser and scheduler do not start:
   connections can be added and tested, but nothing is polled. Rule sets
   stay in shadow until clinical sign-off.

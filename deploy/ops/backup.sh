@@ -21,6 +21,8 @@
 #   6. writes STATE_DIR/backup.status (status=ok|failed, finished_at, ...),
 #      which healthcheck.sh alerts on.
 #
+#   (with OpenBao on) a raft snapshot of the EMR secret store, age-encrypted
+#      too (openbao/enable-openbao.sh --snapshot -).
 # The NATS JetStream store is not backed up: it holds nothing that isn't
 # rebuilt or short-lived (deploy/README.md, "What is backed up").
 # Exit 0 only when every step, offsite included when on, succeeded.
@@ -135,8 +137,27 @@ STEP="manifest"
   printf 'count %s\n' "${LINES[@]:0:n-2}"
 } | enc "$TMP/manifest.age"
 
+# OpenBao, the EMR secret store (deploy/README.md, "OpenBao"), when it is
+# on: a raft snapshot (encrypted by OpenBao itself; it needs the unseal key
+# shares to be read) encrypted again to the recipients. Sealed or down, the
+# database backup still completes; the status says openbao=failed.
+OPENBAO=off
+if [ "$(sed -n 's/^OPENBAO_ENABLED=//p' "$MHAI_BACKEND_DIR/.env" 2>/dev/null | tail -n1)" = true ]; then
+  STEP="openbao snapshot"
+  OPENBAO=failed
+  if bash "$MHAI_BACKEND_DIR/openbao/enable-openbao.sh" --snapshot - \
+       | enc "$TMP/openbao.snap.age" && [ -s "$TMP/openbao.snap.age" ]; then
+    OPENBAO=ok
+  else
+    rm -f "$TMP/openbao.snap.age"
+    ops_log "warning: no OpenBao snapshot (sealed or down?); the database backup goes on"
+  fi
+fi
+
 STEP="checksums"
-(cd "$TMP" && sha256sum globals.sql.age mhai.dump.age manifest.age > SHA256SUMS)
+SUMMED=(globals.sql.age mhai.dump.age manifest.age)
+[ "$OPENBAO" != ok ] || SUMMED+=(openbao.snap.age)
+(cd "$TMP" && sha256sum "${SUMMED[@]}" > SHA256SUMS)
 chmod 600 "$TMP"/*
 mv "$TMP" "$BACKUP_DIR/$TS"
 TMP=''
@@ -191,6 +212,6 @@ if [ -f "$OFFSITE_ENV_FILE" ] && [ -n "$(offsite_env bucket)" ]; then
 fi
 
 ops_write_status "$STATUS" status=ok "finished_at=$(date +%s)" "backup=$TS" "size_bytes=$SIZE" \
-  "offsite=$OFFSITE" "goose_version=$GOOSE" "message=ok"
+  "offsite=$OFFSITE" "openbao=$OPENBAO" "goose_version=$GOOSE" "message=ok"
 DONE=1
 ops_log "backup ok"

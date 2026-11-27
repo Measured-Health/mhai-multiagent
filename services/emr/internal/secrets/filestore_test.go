@@ -129,6 +129,11 @@ func TestFileStoreModes(t *testing.T) {
 	if _, ver, err := s.Get(ctx, p); err != nil || ver != v2 {
 		t.Fatalf("current after cleanup: %q %v", ver, err)
 	}
+	// OpenBao's version names are not set here (the service went back
+	// from OpenBao to this store).
+	if _, err := s.GetVersion(ctx, p, "kv-3"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("an OpenBao version: %v", err)
+	}
 	// A version id is never a path.
 	for _, bad := range []string{"../x", "", "v1/../../etc", strings.Repeat("v", 65)} {
 		if _, err := s.GetVersion(ctx, p, bad); err == nil {

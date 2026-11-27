@@ -34,7 +34,10 @@
 #                      puts the settings back and restarts core without EMR.
 #   --disable          EMR_ENABLED=false, compose.emr.yml out of COMPOSE_FILE,
 #                      emr and egress-emr stopped, core restarted without EMR.
-#                      The keys, the stored credentials and the login stay.
+#                      With OpenBao on, it is stopped too (compose.openbao.yml
+#                      out, OPENBAO_ENABLED=false; openbao/enable-openbao.sh
+#                      after this script puts it back). The keys, the stored
+#                      credentials and the login stay.
 #   --connector-types  the types the platform may offer, from fhir_r4,
 #                      file_export and hl7v2_file (default fhir_r4,file_export;
 #                      kept in .env as CORE_EMR_CONNECTOR_TYPES, so a re-run
@@ -84,7 +87,16 @@ restart_core() { # core with the settings now in .env; readyz
 if [ "$MODE" = disable ]; then
   say "Switching the EMR off"
   env_set EMR_ENABLED false
-  env_set COMPOSE_FILE "$(cf_without "$(cf_get)" "$EMR_OVERLAY")"
+  files=$(cf_without "$(cf_get)" "$EMR_OVERLAY")
+  if cf_has "$OPENBAO_OVERLAY"; then
+    # OpenBao serves the emr service only: off with it (its volume stays;
+    # openbao/enable-openbao.sh after enable-emr.sh puts it back).
+    dc stop openbao >/dev/null 2>&1 || true
+    dc rm -f openbao >/dev/null 2>&1 || true
+    files=$(cf_without "$files" "$OPENBAO_OVERLAY")
+    env_set OPENBAO_ENABLED false
+  fi
+  env_set COMPOSE_FILE "$files"
   dc stop emr egress-emr >/dev/null 2>&1 || true
   dc rm -f emr egress-emr >/dev/null 2>&1 || true
   t0=$(now_s)

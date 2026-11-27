@@ -124,9 +124,13 @@ rollback() {
   if [ -f "$SNAP/compose-file" ]; then before=$(cat "$SNAP/compose-file"); else before=compose.yml; fi
   before=$(cf_without "$before" "$PROD_OVERLAY")
   before=$(cf_without "$before" "$EMR_OVERLAY")
+  before=$(cf_without "$before" "$OPENBAO_OVERLAY")
   if [ "$(env_get EMR_ENABLED)" = true ] || running emr emr || running egress-emr emr; then
-    info "the EMR speaks TLS only: switching it off first"
+    info "the EMR speaks TLS only: switching it off first (OpenBao with it)"
     env_set EMR_ENABLED false
+    [ "$(env_get OPENBAO_ENABLED)" != true ] || env_set OPENBAO_ENABLED false
+    COMPOSE_FILE=$(cf_with "$(cf_get)" "$OPENBAO_OVERLAY") docker compose --profile emr stop openbao >/dev/null 2>&1 || true
+    COMPOSE_FILE=$(cf_with "$(cf_get)" "$OPENBAO_OVERLAY") docker compose --profile emr rm -f openbao >/dev/null 2>&1 || true
     docker compose --profile emr stop emr egress-emr >/dev/null 2>&1 || true
     docker compose --profile emr rm -f emr egress-emr >/dev/null 2>&1 || true
   fi
@@ -237,6 +241,9 @@ CERTS=(
   "bff-clinical|client||bff|$WEB_UID|400"
   "bff-platform|client||bff|$WEB_UID|400"
 )
+# OpenBao's server certificate (openbao/enable-openbao.sh), once it has
+# one: renewed with the others.
+[ ! -d "$DEST/tls/openbao" ] || CERTS+=("openbao|server|openbao|openbao|$OPENBAO_UID|400")
 need_issue=$RENEW
 if [ ! -f "$PUB/ca.pem" ]; then
   need_issue=1
@@ -294,6 +301,10 @@ else
   for c in "${CERTS[@]}"; do IFS='|' read -r name _ <<<"$c"; install -m 644 "$work/$name.pub.pem" "$PUB/$name.pem"; done
   install -m 644 "$CA/ca.pem" "$PUB/ca.pem"
   info "placed in tls/<service> and secrets/bff/tls (public copies in tls/public)"
+  if [ -d "$DEST/tls/openbao" ] && running openbao emr; then
+    # A new certificate without a restart (a restart would seal it).
+    COMPOSE_FILE=$(cf_get) docker compose --profile emr kill -s HUP openbao >/dev/null && info "OpenBao reloaded its certificate (SIGHUP; still unsealed)"
+  fi
 fi
 if [ -f "$PUB/nats.pem" ]; then report_expiry "$PUB/nats.pem" "the certificates"; fi
 

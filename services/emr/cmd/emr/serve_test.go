@@ -3,8 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/Measured-Health/mhai-multiagent/services/emr/internal/config"
 
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/emrpb"
 	"github.com/Measured-Health/mhai-multiagent/services/gokit/reqtoken"
@@ -66,11 +70,22 @@ func TestServeRefusesWithoutSealingKey(t *testing.T) {
 	if _, err := loadSealKeys(env["EMR_SEAL_KEY_PATH"]); err == nil {
 		t.Fatal("an empty sealing key directory accepted")
 	}
-	if _, err := openStore("", "development"); err != nil {
+	if s, err := openStore(config.Settings{Env: "development", SecretStore: "none"}); err != nil || s != nil {
 		t.Fatalf("no store configured: %v", err)
 	}
-	if s, err := openStore(t.TempDir(), "production"); err == nil || s != nil {
+	if s, err := openStore(config.Settings{Env: "production", SecretStore: "file", SecretsDir: t.TempDir()}); err == nil || s != nil {
 		t.Fatal("the file store opened in production")
+	}
+	// OpenBao opens without reaching the server (sealed or down, the
+	// service still starts and fails closed); a bad CA is refused, and the
+	// error names no file.
+	ca := t.TempDir() + "/ca.pem"
+	if err := os.WriteFile(ca, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := openStore(config.Settings{Env: "production", SecretStore: "openbao", OpenBaoAddr: "https://openbao:8200",
+		OpenBaoCAFile: ca, OpenBaoCredentialsFile: ca}); err == nil || s != nil || strings.Contains(err.Error(), ca) {
+		t.Fatalf("a bad CA accepted: %v", err)
 	}
 }
 

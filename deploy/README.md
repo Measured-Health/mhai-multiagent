@@ -1666,10 +1666,11 @@ The emr service (ADR 0014) and its proxy egress-emr, on this host (profile
 | `secrets/nats-emr.nk`, `secrets/emr-proxy.key`, `secrets/core-idempotency-hmac.key` | 0400, uid 65532 |
 | `emr/seal/` (sealing pair), `emr/store/` (the file secret store) | 0700, uid 65532; `secrets/emr-seal.pub` is the public half core reads |
 
-The emr service runs as **staging**: the file secret store is the only one
-built and production refuses it (H3); staging keeps every other production
-rule (TLS, verify-full, NKey only, system roots, no stub, no synthetic
-tables).
+Without OpenBao the emr service runs as **staging**: the file secret store
+is for development and staging only, and production refuses it. Staging
+keeps every other production rule (TLS, verify-full, NKey only, system
+roots, no stub, no synthetic tables). With OpenBao on
+(`openbao/enable-openbao.sh`, next section) it runs as **production**.
 
 ```bash
 cd /srv/mhai-backend
@@ -1697,6 +1698,217 @@ The code tables are synthetic until H6 and load in development only, so in
 staging the normaliser and the scheduler don't start: connections can be
 added, given credentials and tested, but nothing is polled. The rule sets
 stay off (shadow) until the clinical sign-off.
+
+## OpenBao (the EMR secret store)
+
+Hospitals' connection credentials (FHIR keys, SFTP keys) live in OpenBao
+(H3, chosen by the owner on 27 Nov 2026: OpenBao on the live host for now).
+OpenBao is the MPL-2.0 fork of HashiCorp Vault. With it the emr service
+runs as **production**. Production refuses the file store.
+
+| File | What it is |
+|---|---|
+| `openbao/enable-openbao.sh` | `--check`, `--prepare`, the setup and switch, `--unseal`, `--status`, `--rotate-credentials`, `--disable`, `--purge-file-store`, `--snapshot` |
+| `compose.openbao.yml` | the `openbao` service and emr as production with it (`COMPOSE_FILE=...:compose.emr.yml:compose.openbao.yml`) |
+| `openbao/openbao.hcl` | the server: raft storage and the audit log on the volume; the TLS listener (client certificate required); the operator's loopback listener |
+| `openbao/emr-policy.hcl`, `openbao/backup-policy.hcl`, `openbao/configure.sh` | the policies, and the in-container setup (mount, policies, AppRoles) |
+| `tls/openbao/` | its server certificate from the production CA (uid 100, key 0400); `tls/public/openbao.pem` |
+| `secrets/openbao-emr.json` | emr's AppRole `role_id`, `secret_id` (0400, uid 65532) |
+| `secrets/openbao-backup.json` | the backup's AppRole (0400, root) |
+| volume `mhai-backend-openbao` | raft data and `audit.log` (external: `down -v` never takes it) |
+
+### What it is
+
+- **Access.** Only the emr service reaches OpenBao. The two share the
+  internal `openbao` network, with no published port. TLS 1.3 runs from our
+  production CA, and OpenBao requires a client certificate from that CA:
+  emr's own `tls/emr`. Core has no access.
+- **Login.** emr logs in by AppRole. Its policy covers
+  `mhai/{data,metadata,destroy}/production/emr/<hospital>/<connection>/<field>`
+  and one connection's field list, nothing else. There is no default policy,
+  no `sys/`, no other environment, and no list above one connection. Tokens
+  last 15 minutes.
+- **Storage.** Secrets are KV v2 at `mhai/`, so the path is the store's
+  `mhai/production/emr/<hospital>/<connection>/<field>`. Versions are kept
+  and pruned after 24 h, as the file store does.
+- **Fails closed.** Sealed or down, emr still runs. Its health reports
+  `secret_store_ready=false`, credential puts and tests get no answer (the
+  platform shows not ready), and sync treats the connection as `unreachable`
+  (design table).
+- **Audit.** Every request is logged with HMAC'd values to
+  `/openbao/file/audit.log` on the volume. If that file can't be written,
+  OpenBao refuses requests.
+- **Root token.** The root token is revoked at the end of setup. Admin work
+  (rotation, a re-run) uses a short-lived root token made from 3 key shares
+  on the loopback listener, and revokes it at the end.
+
+### Run-book (on the host, as `ubuntu`)
+
+Production mode and the EMR must be on first. The first step needs the
+production CA once, for OpenBao's certificate.
+
+```bash
+cd /srv/mhai-backend
+bash openbao/enable-openbao.sh --check                       # writes nothing
+# 1. Bring the CA back (README, "The private CA") to ~/mhai-ca, then:
+bash openbao/enable-openbao.sh --prepare --ca-dir ~/mhai-ca  # cert, config, volume, image; nothing restarts
+#    ...and move ~/mhai-ca off this host again.
+# 2. The setup and the switch (about 15 s; emr away about 6 s; the rest of the site untouched):
+bash openbao/enable-openbao.sh
+# 3. Check:
+bash openbao/enable-openbao.sh --status
+docker compose --profile emr logs --no-log-prefix emr | grep 'emr serving'   # "env":"production","secret_store":"openbao"
+```
+
+The setup initialises OpenBao **once**. It makes 5 Shamir key shares, any
+3 of which unseal it. It writes them only to a new 0600 file in
+`~/mhai-openbao-init/` (folder 0700). They are never printed, and never go
+to `.env` or a log. The script also:
+
+- configures the mount, the policies and the AppRoles;
+- writes emr's and the backup's credentials;
+- revokes the root token and removes it from the file;
+- recreates emr as production with OpenBao and checks it (`emr secrets ready`);
+- moves any credentials from the file store (`emr secrets move-from-file`;
+  idempotent, prints counts only).
+
+A failure during the switch puts emr back as it was.
+
+Rehearsed on the build server, 27 Nov. A copy of the live compose in
+production mode with the EMR on, under the project `ob-rh`:
+
+| Step | Time |
+|---|---|
+| `--prepare` | 0.8 s |
+| setup and switch | 15.3 s (emr away 6.5 s; 1 staged credential moved) |
+| a re-run | 8.3 s |
+| `--rotate-credentials` | 11.7 s |
+| `--disable` | 5.3 s |
+| enable again | 11.6 s (emr away 4.3 s) |
+
+### OpenBao: the key shares (the owner)
+
+Right after the setup, move `~/mhai-openbao-init/` off the host:
+
+- Copy each share to a different person or place, so that no one person and
+  no one place holds 3. Use the password manager entry with the production
+  CA for at most one or two of them.
+- Never put a share in chat, email, a ticket or this repository.
+- Then run `shred -u ~/mhai-openbao-init/init-*.json && rmdir ~/mhai-openbao-init`.
+
+With fewer than 3 shares left, every stored credential is lost. The hospitals would
+then enter them again. There is no recovery.
+
+### After any restart: unseal
+
+OpenBao starts **sealed** after a reboot, a `docker compose restart`, or a
+deploy that recreates it (a new image digest or a changed `openbao` service).
+The deploy never fails because of it. `emr/emr.sh` prints
+`::warning::emr: OpenBao is sealed ...` and emr fails closed until someone
+unseals it:
+
+```bash
+bash /srv/mhai-backend/openbao/enable-openbao.sh --unseal
+#   key share 1 of 3 (hidden): ...   (three people can each type theirs)
+```
+
+The rehearsal timings:
+
+- 1.4 s to unseal;
+- 1.2 s more until emr reaches the store (its next login);
+- 37 s from a restart to back in service, with someone ready with the shares.
+
+A deploy that only changes emr's image leaves OpenBao running and unsealed
+(rehearsed).
+
+If a wrong share is given, the progress is reset, and 3 must be given
+again.
+
+**Auto-unseal (later, not built).** OpenBao can unseal itself from a key
+held elsewhere:
+
+- `seal "transit"` from a second OpenBao on another host;
+- a cloud KMS (`awskms`, `gcpckms`, `azurekeyvault`: AWS is ruled out);
+- PKCS#11 on an HSM or a YubiHSM on the host.
+
+Each moves the unseal key to something that must be up when OpenBao
+restarts. Each also turns the shares into recovery keys. That is the step
+to take when OpenBao moves to its own machine (H3's preferred end state).
+
+### Rotation, renewal, backup, off
+
+- **`--rotate-credentials`** (needs 3 shares, read from the init file while
+  it is still on the host): new AppRole `secret_id`s for emr and the backup,
+  the old ones destroyed, emr restarted. Do it yearly, and at once if
+  `secrets/` may have leaked.
+- **The certificate** is renewed with the others
+  (`production/enable-production.sh --renew --ca-dir ...`). OpenBao reloads
+  it on SIGHUP and stays unsealed. `production/check-mode.sh` (every deploy)
+  checks it with `OPENBAO_ENABLED=true`.
+- **Backup.** `deploy/ops/backup.sh` adds `openbao.snap.age` to each backup:
+  a raft snapshot made by the backup AppRole (`--snapshot -`, as root). It
+  is encrypted by OpenBao and then again by age to the backup recipients.
+  Restoring it needs 3 shares. If OpenBao is sealed, the database backup
+  still runs and the status says `openbao=failed`.
+- **Off:** `bash openbao/enable-openbao.sh --disable` puts emr back to
+  staging with the file store and stops OpenBao. The volume, the
+  certificate and the credentials files stay. Credentials set while on
+  OpenBao are not in the file store, so those connections show
+  `sign_in_refused` until they are entered again. `--purge-file-store`,
+  after the switch is checked, empties `emr/store/`.
+  `emr/enable-emr.sh --disable` and `production/enable-production.sh
+  --rollback` switch OpenBao off too.
+
+### Threat model (secure-design)
+
+- **Assets:** hospital connection credentials; the key shares; the root
+  token; emr's AppRole `secret_id`; the audit log.
+- **Boundaries:**
+  - emr → OpenBao: the internal `openbao` network, TLS 1.3, a client
+    certificate from our CA, and an AppRole token.
+  - operator → OpenBao: `docker exec` to the loopback listener. Only the
+    deploy user (docker group) and root.
+  - the volume → disk and backups.
+- **Unseal share custody:** 5 shares, 3 to unseal, held by different people
+  and places off the host. The script never prints them. They exist on the
+  host only between the setup and the owner's move.
+- **The root token** is revoked at the end of the setup. It is made again
+  only from 3 shares, for one operation, on the loopback listener only. The
+  TLS listener keeps OpenBao's default: no unauthenticated root generation.
+- **Policy scope:** emr reads, writes and deletes only its environment's EMR
+  paths, and lists only one connection's fields. The integration test
+  proves the refusals:
+  - other environments;
+  - listing a hospital;
+  - `sys/`, snapshots and cubbyhole;
+  - minting a `secret_id`.
+  The backup role reads snapshots only.
+- **Network isolation:**
+  - no published port;
+  - no route out;
+  - nothing but emr on its network (a test in `compose_production_test.go`);
+  - non-root, read-only root, no capabilities, pinned by digest.
+- **Backups:** the volume is encrypted at rest by OpenBao's barrier. The
+  nightly snapshot is age-encrypted with the database backups. Either
+  needs 3 shares to read.
+- **Someone with the host, OpenBao sealed:** the volume, the backups and
+  emr's AppRole file give nothing. AppRole login fails while sealed, and the
+  data needs the shares.
+- **Someone with the host (root or the docker group), OpenBao unsealed:**
+  they can log in as emr (its credentials file) and read every hospital
+  credential, as the emr process can. They can also read the process's
+  memory. The separation is against disk theft, backups, other containers
+  and core, not against root on a running host. That is why the preferred
+  end state is OpenBao on its own machine. Then rotate the hospitals'
+  credentials and emr's `secret_id`.
+- **Residual risks:**
+  - an operator must unseal after every restart (no auto-unseal yet);
+  - single node (no HA);
+  - the audit log grows without rotation;
+  - mlock is not used (raft storage; OpenBao 2.7 has no `disable_mlock`),
+    so secrets could reach swap if the host has it;
+  - an emr token lives up to 15 minutes after its `secret_id` is destroyed
+    (rotation restarts emr).
 
 ## Intelligence on its own server (split mode, off by default)
 

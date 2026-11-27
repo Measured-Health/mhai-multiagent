@@ -8,6 +8,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **OpenBao, the EMR secret store (H3; plan Task 12).** Hospital connection
+  credentials move to OpenBao (owner's choice, 27 Nov; on the live host
+  for now), and the emr service runs as production with it.
+  - `internal/secrets/openbao.go`: KV v2 over TLS 1.3 with our CA and a
+    client certificate; AppRole login; closed errors; fails closed.
+  - `EMR_SECRET_STORE=openbao` and `EMR_OPENBAO_*`. Production refuses
+    anything else.
+  - New commands: `emr secrets ready` and `emr secrets move-from-file`.
+  - `deploy/compose.openbao.yml` and `deploy/openbao/enable-openbao.sh`:
+    - 5 key shares, 3 to unseal, written only to a 0700 folder for the owner;
+    - the root token revoked;
+    - `--unseal`, `--status`, `--rotate-credentials`, `--disable`,
+      `--purge-file-store`, `--snapshot`.
+  - The deploy warns, and does not fail, while OpenBao is sealed.
+  - The nightly backup adds an encrypted raft snapshot.
+  - The certificate renews with production mode's.
+
 - **Production mode and the EMR switch for the single-host backend**
   (deploy/README.md, "Production mode" and "EMR integration";
   docs/deploy/production-tls-emr.md). `production/enable-production.sh`:
