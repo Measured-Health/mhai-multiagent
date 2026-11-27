@@ -364,7 +364,7 @@ func TestEveryActionHasCatalogueRow(t *testing.T) {
 				t.Errorf("%s maps payload key %q, which its schema doesn't have", a, from)
 			}
 		}
-		if withheld(e) && (e.Target != nil || e.Outcome != nil || e.Flag != nil || len(e.Facts) > 0) {
+		if withheld(e) && (e.Target != nil || e.Outcome != nil || e.Flag != nil || len(e.Facts) > 0 || len(e.Set) > 0) {
 			t.Errorf("%s is withheld but derives fields", a)
 		}
 	}
@@ -394,6 +394,21 @@ func TestCatalogueUsesOnlyWebVocabulary(t *testing.T) {
 		for _, to := range e.Facts {
 			if _, ok := voc.Facts[to]; !ok {
 				t.Errorf("%s: facts key %q is not mhai-web's", a, to)
+			}
+		}
+		for k, v := range e.Set {
+			r, ok := voc.Facts[k]
+			if !ok {
+				t.Errorf("%s: set facts key %q is not mhai-web's", a, k)
+				continue
+			}
+			for _, to := range e.Facts {
+				if to == k {
+					t.Errorf("%s: facts key %q is both set and mapped", a, k)
+				}
+			}
+			if !voc.fits(r, v) {
+				t.Errorf("%s: set facts.%s doesn't have mhai-web's shape (%s)", a, k, r.Shape)
 			}
 		}
 	}
@@ -486,7 +501,7 @@ func fuzzCatalogue(t *testing.T, voc *vocabulary, n int) {
 	t.Helper()
 	rng := rand.New(rand.NewSource(20261103))
 	pool := candidates()
-	entities := []string{"", "session", "hospital", "query", "correction", "job", "audit_run", "audit_list", "audit_search", "user", "operation", "emr_connection", "clearance", "audit_export"}
+	entities := []string{"", "session", "hospital", "query", "correction", "job", "audit_run", "audit_list", "audit_search", "user", "operation", "emr_connection", "clearance", "audit_export", "legal_hold"}
 	entityIDs := append([]string{"", "6f1c1c3e-2c0b-4c55-9a52-0d2e5b0b7a11", "pipeline.run_query", "has space"}, pseudonyms...)
 	hospitals := []string{"", "6f1c1c3e-2c0b-4c55-9a52-0d2e5b0b7a11"}
 	mappedOnce := map[string]bool{}
@@ -576,6 +591,12 @@ func fuzzCatalogue(t *testing.T, voc *vocabulary, n int) {
 			}
 			voc.checkMapped(t, a, m)
 			for key, v := range m.Facts {
+				if set, ok := e.Set[key]; ok {
+					if mustJSON(t, v) != mustJSON(t, set) {
+						t.Errorf("%s: facts.%s is not the row's set value", a, key)
+					}
+					continue
+				}
 				var from string
 				for f, to := range e.Facts {
 					if to == key {

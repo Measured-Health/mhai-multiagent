@@ -1,8 +1,8 @@
 {
-  "_about": ["mhai-web's audit vocabulary, as its audit screens accept it (Plan 4 spec 5.3). Copied by hand from the commit below; never edited here except to re-copy.", "types: AUDIT_TYPES (audit-contract.ts). kinds: KINDS (kinds.ts), each with its type, the target kinds it may name and whether it may carry a note.", "facts and filters: AuditFacts and RecordedFilters (audit-contract.ts) with the shapes read.ts checks (isFacts, isFilters).", "pending_in_web: kinds this backend sends that mhai-web has not shipped yet; until it does, those entries show as undisplayable. Remove the list once mhai-web ships them (Plan 4 Task 14, TODO.md).", "Spec 5.3 marks seven kinds new; audit_undisplayable_reported is already in mhai-web at this commit, so six are pending."],
+  "_about": ["mhai-web's audit vocabulary, as its audit screens accept it (Plan 4 spec 5.3). Copied by hand from the commit below; never edited here except to re-copy.", "types: AUDIT_TYPES (audit-contract.ts). kinds: KINDS (kinds.ts), each with its type, the target kinds it may name and whether it may carry a note.", "facts and filters: AuditFacts and RecordedFilters (audit-contract.ts) with the shapes read.ts checks (isFacts, isFilters).", "pending_in_web: kinds this backend sends that mhai-web has not shipped yet; until it does, those entries show as undisplayable. Empty when mhai-web has them all.", "Re-copied 27 Nov from mhai-web main at the commit below, with the six kinds of mhai-web PR #129 (fix/audit-kinds-core-sends: answer_agreed, review_withdrawn, review_refused, learning_recorded, audit_check_started, audit_check_finished) taken as merged; until #129 is merged, those six still show as undisplayable."],
   "source": {
     "repo": "Measured-Health/mhai-web",
-    "commit": "b2f1104001d595f19c29ff71f1e0f5143b346dae",
+    "commit": "7f27218ebf2325090fee9fa245e236b1a45094ab",
     "files": ["apps/platform/lib/api/audit-contract.ts", "apps/platform/lib/audit/kinds.ts", "apps/platform/lib/audit/read.ts"]
   },
   "types": ["sign_in", "account", "staff", "hospital_settings", "consultation", "review", "alerts", "analysis", "named_access", "platform", "export", "audit", "retention", "security"],
@@ -302,12 +302,27 @@
       "targets": [],
       "note": false
     },
+    "answer_agreed": {
+      "type": "consultation",
+      "targets": [],
+      "note": false
+    },
     "review_submitted": {
       "type": "review",
       "targets": [],
       "note": false
     },
     "review_reassigned": {
+      "type": "review",
+      "targets": [],
+      "note": false
+    },
+    "review_withdrawn": {
+      "type": "review",
+      "targets": [],
+      "note": false
+    },
+    "learning_recorded": {
       "type": "review",
       "targets": [],
       "note": false
@@ -343,6 +358,11 @@
       "note": false
     },
     "drilldown_deidentified": {
+      "type": "analysis",
+      "targets": ["patient"],
+      "note": false
+    },
+    "analysis_patients_viewed": {
       "type": "analysis",
       "targets": ["patient"],
       "note": false
@@ -452,6 +472,11 @@
       "targets": [],
       "note": false
     },
+    "model_policy_changed": {
+      "type": "platform",
+      "targets": [],
+      "note": false
+    },
     "jobs_retried": {
       "type": "platform",
       "targets": [],
@@ -557,6 +582,16 @@
       "targets": ["run"],
       "note": false
     },
+    "audit_check_started": {
+      "type": "audit",
+      "targets": ["run"],
+      "note": false
+    },
+    "audit_check_finished": {
+      "type": "audit",
+      "targets": ["run"],
+      "note": false
+    },
     "audit_check_outcome": {
       "type": "audit",
       "targets": ["run"],
@@ -627,6 +662,11 @@
       "targets": [],
       "note": false
     },
+    "review_refused": {
+      "type": "security",
+      "targets": [],
+      "note": false
+    },
     "mfa_locked": {
       "type": "security",
       "targets": [],
@@ -638,48 +678,5 @@
       "note": false
     }
   },
-  "pending_in_web": [
-    {
-      "kind": "answer_agreed",
-      "type": "consultation",
-      "targets": [],
-      "note": false,
-      "for": ["feedback.validated"]
-    },
-    {
-      "kind": "review_withdrawn",
-      "type": "review",
-      "targets": [],
-      "note": false,
-      "for": ["correction.withdrawn"]
-    },
-    {
-      "kind": "review_refused",
-      "type": "security",
-      "targets": [],
-      "note": false,
-      "for": ["correction.decision_refused"]
-    },
-    {
-      "kind": "learning_recorded",
-      "type": "review",
-      "targets": [],
-      "note": false,
-      "for": ["correction.applied", "correction.apply_failed"]
-    },
-    {
-      "kind": "audit_check_started",
-      "type": "audit",
-      "targets": ["run"],
-      "note": false,
-      "for": ["audit.verify_started"]
-    },
-    {
-      "kind": "audit_check_finished",
-      "type": "audit",
-      "targets": ["run"],
-      "note": false,
-      "for": ["audit.verify_finished"]
-    }
-  ]
+  "pending_in_web": []
 }
