@@ -38,7 +38,7 @@ services:
   # user (distroless nonroot, 65532) and readable by it alone. The paths
   # come from the generated env file (.github/scripts/boundary-smoke.sh).
   analysis-keys:
-    image: postgres:16.15-alpine
+    image: postgres:16.16-alpine
     restart: "no"
     user: "0:0"
     entrypoint: ["/bin/sh", "-c"]
