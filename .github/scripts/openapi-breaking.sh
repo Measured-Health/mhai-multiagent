@@ -53,18 +53,35 @@ ONE_CODE_OPS = {("POST", "/auth/mfa/enroll"), ("POST", "/auth/mfa/recovery-codes
 ONE_CODE_TEXT = re.compile(
     r"^the `recovery_codes` response property's minItems was decreased from `10` to `1` for the response status `200`$"
 )
+# ADR 0019 (27 Nov 2026, recorded under the owner's "decide and proceed"
+# rule): the hl7v2_file connector type is a new value of
+# EmrConnectorType.id on exactly GET /platform/emr/connector-types. Core
+# offers a type only once CORE_EMR_CONNECTOR_TYPES lists it, and the one
+# reader (the platform BFF, mhai-web) adds the value first, so no client
+# sees it unknown. This matches only that value on that route; any other
+# enum change still fails.
+NEW_TYPE_ID = "response-property-enum-value-added"
+NEW_TYPE_OPS = {("GET", "/platform/emr/connector-types")}
+NEW_TYPE_TEXT = re.compile(
+    r"^added the new `hl7v2_file` enum value to the `types/items/id` response property for the response status `200`$"
+)
 findings = json.load(open(sys.argv[1])) or []
-kept, allowed, one_code = [], 0, 0
+kept, allowed, one_code, new_type = [], 0, 0, 0
 for f in findings:
     if f.get("id") == ALLOWED_ID and ALLOWED_TEXT.match(f.get("text", "")):
         allowed += 1
     elif (f.get("id") == ONE_CODE_ID and (f.get("operation"), f.get("path")) in ONE_CODE_OPS
           and ONE_CODE_TEXT.match(f.get("text", ""))):
         one_code += 1
+    elif (f.get("id") == NEW_TYPE_ID and (f.get("operation"), f.get("path")) in NEW_TYPE_OPS
+          and NEW_TYPE_TEXT.match(f.get("text", ""))):
+        new_type += 1
     else:
         kept.append(f)
 if one_code:
     print(f"openapi-breaking: {one_code} recovery_codes minItems 10 -> 1 finding(s) allowed (one backup code, 24 Nov 2026)")
+if new_type:
+    print(f"openapi-breaking: {new_type} hl7v2_file connector type finding(s) allowed (ADR 0019)")
 errors = [f for f in kept if f.get("level", 0) >= 3]
 for f in kept:
     lvl = "error" if f.get("level", 0) >= 3 else "warning"

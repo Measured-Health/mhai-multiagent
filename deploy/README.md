@@ -1676,7 +1676,7 @@ tables).
 cd /srv/mhai-backend
 bash emr/enable-emr.sh --check
 bash emr/enable-emr.sh                                    # fhir_r4,file_export
-# once a release with hl7v2_file is deployed:
+# HL7 v2 message files too (ADR 0019; off until listed):
 bash emr/enable-emr.sh --connector-types fhir_r4,file_export,hl7v2_file
 ```
 

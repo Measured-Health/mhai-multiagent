@@ -36,9 +36,10 @@
 #                      emr and egress-emr stopped, core restarted without EMR.
 #                      The keys, the stored credentials and the login stay.
 #   --connector-types  the types the platform may offer, from fhir_r4,
-#                      file_export and hl7v2_file (default fhir_r4,file_export).
-#                      Core refuses a type its image wasn't built with: add
-#                      hl7v2_file only once that release is deployed.
+#                      file_export and hl7v2_file (default fhir_r4,file_export;
+#                      kept in .env as CORE_EMR_CONNECTOR_TYPES, so a re-run
+#                      without it keeps the list). hl7v2_file (ADR 0019) is
+#                      off until it is listed here.
 #
 # It prints no secret and no key, and touches only this backend's compose
 # project.

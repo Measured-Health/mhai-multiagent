@@ -91,7 +91,7 @@ func TestStubOnlyInDevelopment(t *testing.T) {
 // Every registered connector declares exactly its row of the shared table
 // (gokit/emrtypes), so core's fields and the emr service's agree.
 func TestConnectorsDeclareTheSharedTable(t *testing.T) {
-	r := connector.NewRegistry(true, stub.New(), fhir.New(nil), fileexport.New(nil))
+	r := connector.NewRegistry(true, stub.New(), fhir.New(nil), fileexport.New(nil), fileexport.NewHL7(nil))
 	for _, id := range emrtypes.Built(true) {
 		c, ok := r.Get(id)
 		if !ok {

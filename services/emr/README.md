@@ -264,6 +264,30 @@ platform sees it as errors for 24 hours after a run that kept dead letters.
 - The format is published at `docs/specs/formats/mhai_csv_v1.md`, with
   synthetic samples in `internal/connector/fileexport/testdata/sample/`.
 
+## What is built: HL7 v2 message files (`hl7v2_file`)
+
+Design: `docs/designs/2026-11-27-hl7v2-file-connector-and-bridge.md` §3;
+format: `docs/specs/formats/hl7v2_file_v1.md`; ADR 0019. Migration
+**00061** (core) lets `emr_connections.type` and `raw_records.connector_type`
+be `hl7v2_file` and gives it the file export's staleness rule.
+
+- `internal/hl7v2`: the ER7 parser (delimiters from each MSH, escapes
+  decoded only when a value is read, `\r`, `\n` or `\r\n`, FHS/BHS/BTS/FTS
+  envelopes with their counts checked, MSH-18 `ASCII`, `UNICODE UTF-8` or
+  `8859/1` and nothing guessed; caps on file, message, segment, fields,
+  repetitions, components and subcomponents), DTM times (an offset, or the
+  connection's `time_zone`, or refused), and the file names. Fuzzed
+  (`FuzzParseBatch`, `FuzzParseTime`; not in CI).
+- `internal/connector/fileexport` (`NewHL7`): the `file_export` transport
+  unchanged, reading `hl7-<time>[-<seq>].hl7`. ORU^R01 maps to
+  observations, RDE^O11 to medication requests, PID to the patient (the MRN
+  only by `mrn_identifier_type` under `mrn_namespace`), PV1 to the
+  encounter and its ward. Other message types, test messages (MSH-11 not
+  `P`), narrative or pending OBX are skipped and counted
+  (`Metrics.RecordsSkipped`). `FuzzParseHL7` fuzzes the mapper.
+- **To switch it on:** mhai-web with `hl7v2_file` in its connector-type
+  enum first, then add `hl7v2_file` to `CORE_EMR_CONNECTOR_TYPES`.
+
 ## Settings
 
 | Variable | |

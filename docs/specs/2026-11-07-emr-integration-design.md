@@ -144,7 +144,7 @@ type Connector interface {
 | id | label (platform app only) | Fields | Status |
 |---|---|---|---|
 | `fhir_r4` | FHIR R4 server | `client_id` text; `token_url` text; `private_key` secret (SMART Backend Services, `private_key_jwt`, RS384 or ES384); optional `scope` text | **Build first** (§5.1) |
-| `document_archive` | Scanned record archive | `api_key` secret | **The pilot hospital, phase H-a** (§5.3) |
+| `document_archive` | DocFlow (scanned record archive; label renamed 27 Nov) | `api_key` secret | **The pilot hospital, phase H-a** (§5.3) |
 | `file_export` | Scheduled file export | `folder` text; `host_key_fingerprint` text; `format` text (`mhai_csv_v1`); `access_key` secret | **The pilot hospital, phase H-b** (§5.4) |
 | `hl7v2_feed` | Results message feed | `sender_id` text; `shared_key` secret | **Not built** (needs an inbound listener; §7.3). Listed by mhai-web's sample data only; the API does not offer it until built |
 

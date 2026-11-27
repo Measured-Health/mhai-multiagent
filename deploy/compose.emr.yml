@@ -11,9 +11,10 @@
 #   - the idempotency HMAC key (secrets/core-idempotency-hmac.key, 0400,
 #     uid 65532);
 #   - the connector types the platform may offer: CORE_EMR_CONNECTOR_TYPES in
-#     .env, fhir_r4,file_export by default. Core refuses a type its image
-#     wasn't built with, so add one (hl7v2_file) only after that release is
-#     deployed: `enable-emr.sh --connector-types fhir_r4,file_export,hl7v2_file`.
+#     .env, fhir_r4,file_export by default. hl7v2_file (HL7 v2 message files,
+#     ADR 0019) is built too and stays off until it is listed:
+#     `enable-emr.sh --connector-types fhir_r4,file_export,hl7v2_file`. Core
+#     refuses a type its image wasn't built with.
 
 services:
   core:
