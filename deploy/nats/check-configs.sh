@@ -44,6 +44,7 @@ case "$image" in nats:[0-9]*.[0-9]*.[0-9]*-alpine) ;; *) echo "the deploy's NATS
 printf '%s' "$rendered" | jq -r '.services.nats.environment | to_entries[] | "\(.key)=\(.value)"' > "$work/nats.env"
 grep -q '^NATS_PIPELINE_NKEY=U' "$work/nats.env" || { echo "the nats service has no NATS_PIPELINE_NKEY default" >&2; exit 1; }
 grep -q '^NATS_NOTIFICATIONS_NKEY=U' "$work/nats.env" || { echo "the nats service has no NATS_NOTIFICATIONS_NKEY default" >&2; exit 1; }
+grep -q '^NATS_EMR_NKEY=U' "$work/nats.env" || { echo "the nats service has no NATS_EMR_NKEY default" >&2; exit 1; }
 
 check() {
   local name=$1; shift
