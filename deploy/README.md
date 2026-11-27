@@ -1680,9 +1680,9 @@ bash emr/enable-emr.sh                                    # fhir_r4,file_export
 bash emr/enable-emr.sh --connector-types fhir_r4,file_export,hl7v2_file
 ```
 
-Downtime: NATS is recreated once (the emr user's new key) and core
-restarts: a few seconds (rehearsal: core back in 3.2 s, emr serving at
-10.7 s). Check: the platform app's Records connections offers the types;
+Downtime: on the first run NATS is recreated (the emr user's new key) and
+core restarts: expect up to about 15 s. A re-run keeps the key and restarts
+core only (rehearsal: core back in 3.2 s, emr serving at 10.7 s). Check: the platform app's Records connections offers the types;
 `docker compose --profile emr logs --no-log-prefix emr | grep 'emr serving'`
 shows `"env":"staging","secret_store":true,"egress":true`. **Off:**
 `bash emr/enable-emr.sh --disable` (keys, stored credentials and the login

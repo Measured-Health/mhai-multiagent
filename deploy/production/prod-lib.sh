@@ -8,10 +8,14 @@
 # deploy/tls/split-lib.sh (say, info, warn, die, place_files, report_expiry).
 
 ENV_FILE="$DEST/.env"
-# The uids the files are made for: the images' users.
+# The uids the files are made for: the images' users. Used by the scripts
+# that source this file.
+# shellcheck disable=SC2034
 POSTGRES_UID=70 NATS_UID=1000 CORE_UID=65532 NOTIFY_UID=65532 EMR_UID=65532 WEB_UID=1001
+# shellcheck disable=SC2034
 HELPER_IMAGE=${NATS_BOX_IMAGE:-natsio/nats-box:0.19.0}
 PROD_OVERLAY=compose.production.yml
+# shellcheck disable=SC2034
 EMR_OVERLAY=compose.emr.yml
 
 # env_get NAME: the value of NAME in .env (the last one), or empty.

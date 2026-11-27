@@ -152,5 +152,5 @@ Boundaries and what is checked at each:
   Production needs the managed store (H3).
 - JetStream has one replica (`CORE_ALLOW_SINGLE_NODE`): unchanged.
 - Owner sign-off needed: where the CA key is kept, and the maintenance
-  window for the switch (about 25 s of downtime for production mode, a few
-  seconds for the EMR).
+  window for the switch (about 25 s of downtime for production mode, up to
+  about 15 s for the EMR's first run).
