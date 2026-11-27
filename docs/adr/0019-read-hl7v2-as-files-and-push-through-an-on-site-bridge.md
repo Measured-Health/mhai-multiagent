@@ -23,6 +23,7 @@ Most hospital lab and pharmacy systems speak HL7 v2. Interface engines can send 
 - The bridge puts PHI on a host at the hospital: full-disk encryption there is required and is the hospital's to set up; retention and type filtering keep what is stored small.
 - The bridge's SFTP port must be reachable from our egress address (port 22, a DNS name) or over the VPN. That is an inbound port at the hospital, under its firewall.
 - One more deliverable to version and support (an image the hospital runs).
+- **The OpenAPI check allows exactly one enum addition:** `hl7v2_file` in `EmrConnectorType.id` on `GET /platform/emr/connector-types` (oasdiff counts a new response enum value as breaking). Core offers a type only once `CORE_EMR_CONNECTOR_TYPES` lists it, and the only reader, the platform app, adds the value first (its PR merges and deploys before the type is switched on), so no client ever receives a value it doesn't know. `.github/scripts/openapi-breaking.sh` matches only that value on that route.
 
 ## Alternatives considered
 
