@@ -129,7 +129,7 @@ func TestHL7CorrectionsAreVersions(t *testing.T) {
 	cfg := hl7Config()
 	k := hl7test.Potassium(hat)
 	first := parseHL7(t, []byte(hl7test.ORU("C1", "O1", hat, k)), cfg).kind("observation")[0]
-	again := parseHL7(t, []byte(hl7test.ORU("C2", "O1", hat.Add(time.Minute), k)), cfg).kind("observation")[0]
+	again := parseHL7(t, []byte(hl7test.ORU("C2", "O1", hat, k)), cfg).kind("observation")[0]
 	k.Status, k.Value = "C", "5.0"
 	corr := parseHL7(t, []byte(hl7test.ORU("C3", "O1", hat.Add(time.Hour), k)), cfg).kind("observation")[0]
 	if first.SourceID != again.SourceID || first.SourceVersion != again.SourceVersion {
@@ -459,4 +459,24 @@ func FuzzParseHL7(f *testing.F) {
 			}
 		}
 	})
+}
+
+// Security review: a record's source id includes its patient, so an order
+// number a feed reuses for another patient is another record, never a new
+// version that would supersede the first patient's row.
+func TestHL7SourceIDsNameThePatient(t *testing.T) {
+	cfg := hl7Config()
+	a := parseHL7(t, []byte(hl7test.ORU("C1", "O1", hat, hl7test.Potassium(hat))), cfg)
+	other := strings.Replace(hl7test.ORU("C2", "O1", hat, hl7test.Potassium(hat)), hl7test.MRN, "SYN-MRN-0002", 1)
+	b := parseHL7(t, []byte(other), cfg)
+	for _, kind := range []string{"observation", "encounter"} {
+		if a.kind(kind)[0].SourceID == b.kind(kind)[0].SourceID {
+			t.Errorf("%s: one source id for two patients", kind)
+		}
+	}
+	ra := parseHL7(t, []byte(hl7test.RDE("C3", "R1", hat)), cfg).kind("medication")[0]
+	rb := parseHL7(t, []byte(strings.Replace(hl7test.RDE("C4", "R1", hat), hl7test.MRN, "SYN-MRN-0002", 1)), cfg).kind("medication")[0]
+	if ra.SourceID == rb.SourceID {
+		t.Error("medication: one source id for two patients")
+	}
 }

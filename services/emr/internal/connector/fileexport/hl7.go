@@ -525,7 +525,7 @@ func (mc *msgCtx) encounter(pt *patientCtx, seg *hl7v2.Segment) {
 	if visit == "" || pt.id == "" {
 		return
 	}
-	id := joinID(r.v(seg, 19, 4), visit)
+	id := joinID(pt.id, r.v(seg, 19, 4), visit)
 	class, ok := hl7Class[strings.ToUpper(r.v(seg, 2, 1))]
 	if !ok {
 		mc.skip(SkipClass)
@@ -569,8 +569,10 @@ func (mc *msgCtx) observation(pt *patientCtx, orc, obr, seg *hl7v2.Segment) {
 	}
 	codings := r.cwe(seg, 3, 0, false)
 	var id string
-	if order != "" && len(codings) > 0 {
-		id = joinID(order, codings[0].System, codings[0].Code, r.v(seg, 4, 1))
+	// The patient is part of the id: an order number reused for another
+	// patient is another record, never a version superseding this one's.
+	if order != "" && len(codings) > 0 && pt != nil && pt.id != "" {
+		id = joinID(pt.id, order, codings[0].System, codings[0].Code, r.v(seg, 4, 1))
 	}
 	status, known := obsStatusMap[strings.ToUpper(r.v(seg, 11, 1))]
 	switch {
@@ -723,9 +725,13 @@ type medOrder struct {
 // medication maps one order of an RDE^O11 to a medication request.
 func (mc *msgCtx) medication(pt *patientCtx, o *medOrder) {
 	r := mc.reader()
-	id := r.orderID(o.orc, 2)
-	if id == "" {
-		id = r.orderID(o.orc, 3)
+	order := r.orderID(o.orc, 2)
+	if order == "" {
+		order = r.orderID(o.orc, 3)
+	}
+	id := ""
+	if order != "" && pt != nil && pt.id != "" {
+		id = joinID(pt.id, order) // the patient is part of the id, as for results
 	}
 	status := ""
 	if s := strings.ToUpper(r.v(o.orc, 5, 1)); s != "" {

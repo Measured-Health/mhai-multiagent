@@ -108,11 +108,11 @@ Every record is bound to the PID that precedes it **in the same message** (an OR
 - `given` PID-5.2 (and .3), `family` PID-5.1.1, from the repetition with XPN.7 `L` (legal), else the first; `birth_date` from PID-7 (the date part); `sex` from PID-8 (`F` female, `M` male, `O`/`A` other, `U`/`N` unknown). Nothing else of PID is read (no address, phone, religion, national id).
 
 **Location and encounter (PV1)**, only when PV1-19 (visit number) has a value:
-- encounter `source_id` PV1-19 (CX.4.1, CX.1 joined); `class` from PV1-2 (`I` inpatient, `O` outpatient, `E` emergency; others leave the encounter out); `status` `finished` when PV1-45 (discharge time) is set, else `in-progress`; `period_start` PV1-44, `period_end` PV1-45; `location` PV1-3.1 (point of care), `bed_label` PV1-3.3.
+- encounter `source_id` the patient's source id and PV1-19 (CX.4.1, CX.1) joined; `class` from PV1-2 (`I` inpatient, `O` outpatient, `E` emergency; others leave the encounter out); `status` `finished` when PV1-45 (discharge time) is set, else `in-progress`; `period_start` PV1-44, `period_end` PV1-45; `location` PV1-3.1 (point of care), `bed_label` PV1-3.3.
 - location `source_id` PV1-3.1 (with PV1-3.4.1 facility joined), `name` PV1-3.1, `type` from the class (inpatient `ward`, emergency `emergency`, outpatient `clinic`).
 
 **Observation (OBR/OBX in ORU^R01)**
-- `source_id`: the order (OBR-3 filler number, else OBR-2 placer, else ORC-3, ORC-2: EI.1 with EI.2), OBX-3 (identifier and coding system) and OBX-4 (sub-id), joined length-prefixed. A correction (OBX-11 `C`) resends the same order and OBX-3, so it is a new **version** of the same record and the normaliser supersedes the earlier row (design §8.2 there); an identical resend is the same version and a no-op. Over 256 bytes the id is `h:` and its SHA-256.
+- `source_id`: the patient's source id, the order (OBR-3 filler number, else OBR-2 placer, else ORC-3, ORC-2: EI.1 with EI.2), OBX-3 (identifier and coding system) and OBX-4 (sub-id), joined length-prefixed. The patient is part of the id (security review): an order number a feed reuses for another patient is another record, never a version that supersedes the first patient's row. A correction (OBX-11 `C`) resends the same order and OBX-3, so it is a new **version** of the same record and the normaliser supersedes the earlier row (design §8.2 there); an identical resend is the same version and a no-op. Over 256 bytes the id is `h:` and its SHA-256.
 - `source_version`: the SHA-256 of the mapped fields (canonical JSON), so only a change makes a new version.
 - `source_updated_at`: MSH-7.
 - `codings`: OBX-3 as CWE, primary (.1–.3) and alternate (.4–.6) triplets. The coding system (HL7 table 0396) `LN` reads as `http://loinc.org`; every other system as `urn:mhai:hl7v2:<system>` (`urn:mhai:hl7v2:local` when empty), so a connection's reviewed map can key on it and an unmapped one takes the existing `unmapped_codes` path. `code_text` OBX-3.2.
@@ -133,7 +133,7 @@ Every record is bound to the PID that precedes it **in the same message** (an OR
 - `patient` and `encounter`: the source ids above.
 
 **Medication (ORC/RXE in RDE^O11)**
-- `source_id`: ORC-2 (placer order, EI.1 with EI.2), else ORC-3; none makes a dead letter. `kind` `request`.
+- `source_id`: the patient's source id and ORC-2 (placer order, EI.1 with EI.2), else ORC-3; no order makes a dead letter. `kind` `request`.
 - `codings`: RXE-2 (give code). `WC` and `ATC` read as `http://www.whocc.no/atc` (ATC only, design §21); anything else (`RXNORM`, local) as `urn:mhai:hl7v2:<system>`, which takes the `unmapped_codes` path unless the connection's reviewed map names it. `med_text` RXE-2.2.
 - `dose_value` RXE-3, `dose_unit` RXE-5.1 (else .2), `route` RXR-1.2 (else .1), `timing_text` TQ1-3.1 (else RXE-1.2.1), `authored` ORC-9, `period_start` TQ1-7 (else RXE-1.4), `period_end` TQ1-8 (else RXE-1.5).
 - `status` from ORC-5 (`IP`, `SC`, `A` active; `CM` completed; `DC` stopped; `CA` cancelled; `HD` on-hold; `ER` entered-in-error), else ORC-1 (`NW`, `XO`, `RP`, `RL`, `SC` active; `CA`, `OC`, `CR` cancelled; `DC`, `OD`, `DR` stopped; `HD`, `OH` on-hold); anything else is a dead letter.
