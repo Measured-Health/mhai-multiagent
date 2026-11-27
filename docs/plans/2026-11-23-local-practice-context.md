@@ -20,7 +20,7 @@
 
 | PR | Tasks | What | Depends on | Sign-off |
 |---|---|---|---|---|
-| 1. Decisions on paper | 1 | ADR 0019, the SKILLS.md §1 exception and checklist line, contract notes for mhai-web, TODO gates | design approved | H-LP4 |
+| 1. Decisions on paper | 1 | ADR 0020, the SKILLS.md §1 exception and checklist line, contract notes for mhai-web, TODO gates | design approved | H-LP4 |
 | 2. Agreements, switch, storage | 2–3 | migration 00057; `agreement record/approve/narrow/revoke`; switch | 1 | none |
 | 3. Normaliser | 4 | formulary pin, deterministic mapping, property tests | formulary library merged (`feat/formulary-guidelines-testset`) | none |
 | 4. Importer | 5–6 | `import` (path checks, manifest, dry run, stage), `delete`, retention sweep | 2, 3; de-identification TODO (§5.1) | none |
@@ -39,9 +39,9 @@ Each task starts with its abuse-case tests (design §13.5), written failing firs
 
 ### PR 1: decisions on paper
 
-### Task 1: ADR 0019 and the rules
+### Task 1: ADR 0020 and the rules
 
-- [ ] Write `docs/adr/0019-local-practice-context-never-evidence.md` (Proposed): R-LP1 to R-LP3; the scoped exception for `internal/localpractice` (across patients of one hospital, and across hospitals for pooled bodies only); the constraint in design §6.6 (a wider query surface reopens the noise question).
+- [ ] Write `docs/adr/0020-local-practice-context-never-evidence.md` (Proposed): R-LP1 to R-LP3; the scoped exception for `internal/localpractice` (across patients of one hospital, and across hospitals for pooled bodies only); the constraint in design §6.6 (a wider query surface reopens the noise question).
 - [ ] SKILLS.md §1: add the exception beside ADR 0015's, and the checklist line (design §3).
 - [ ] `docs/specs/2026-10-17-frontend-requirements.md` §7: the panel route and its rules (PASS only, separate from citations, label text, one 404); §10: the Practice view.
 - [ ] TODO.md: H-LP1 to H-LP4, the per-hospital onboarding record, Q1 to Q9.

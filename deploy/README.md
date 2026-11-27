@@ -657,9 +657,8 @@ the server:
 - No answer worker runs: `sample-ai` is off and the pilot's pipeline is a
   separate switch (`deploy/pilot/`). Until one runs, a question waits and
   fails at its deadline.
-- The host still runs core as `development` (NATS without TLS on one host,
-  `CORE_DELIVERY=log` unless email is on): production hardening is a TODO.md
-  item, not this switch.
+- Production mode ("Production mode" below) is a separate switch: on the
+  live host since 27 Nov 2026.
 
 ## Public demo: sample answers
 
@@ -1577,8 +1576,8 @@ shadow on the L4.
 
 ## Production mode (TLS for NATS and Postgres)
 
-The live host's backend runs as development until this is done: NATS and
-Postgres without TLS, core `CORE_ENV=development`. Production mode turns on
+**On live since 27 Nov 2026.** Before it, the backend ran as development:
+NATS and Postgres without TLS, core `CORE_ENV=development`. Production mode turns on
 TLS for every link on the host, with our own private CA, and runs core,
 the pipeline and notifications by their production rules. Design and threat
 model: [docs/deploy/production-tls-emr.md](../docs/deploy/production-tls-emr.md).
@@ -1724,7 +1723,8 @@ CI's boundary-smoke job).
 
 ## Known limits
 
-- **No TLS inside the demo instance** until production mode is on
+- **No TLS inside a host** until production mode is on (the live host has
+  been in production mode since 27 Nov 2026)
   ("Production mode" above). Without it Postgres (`sslmode=disable`) and NATS
   run without TLS, on Docker networks and loopback only. The pilot pipeline
   runs on this host with `INTELLIGENCE_SINGLE_HOST=on`, which the worker
