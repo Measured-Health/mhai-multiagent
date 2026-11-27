@@ -43,11 +43,19 @@ func TestClassifyAgreesWithMap(t *testing.T) {
 				}
 			}
 		}
+		shapes := audit.SchemaShapes(a)
 		for i := 0; i < 500; i++ {
+			// An action with shapes (legal_hold.placed, the CLI's and the
+			// platform's): one shape per event, as Write lets through.
+			keys, must := fields, required
+			if len(shapes) > 0 {
+				sh := shapes[rng.Intn(len(shapes))]
+				keys, must = sh.Keys, append(slices.Clone(required), sh.Required...)
+			}
 			payload := map[string]any{}
 			for _, f := range fields {
 				vals := accepted[f]
-				if len(vals) == 0 || (!in(required, f) && rng.Intn(2) == 0) {
+				if len(vals) == 0 || !in(keys, f) || (!in(must, f) && rng.Intn(2) == 0) {
 					continue
 				}
 				payload[f] = vals[rng.Intn(len(vals))]

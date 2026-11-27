@@ -36,6 +36,25 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **Fewer "can't be displayed" entries in the platform audit log.** Eighteen
+  actions core sent bare now map to audit kinds mhai-web already has, with
+  no new kinds, words or facts: `staff.invited` (`staff_invited`),
+  `staff.roles_changed`, `analyst.granted` and `analyst.removed`
+  (`staff_role_changed`), `staff.deactivated` and `staff.reactivated`
+  (`staff_deactivated`, `staff_reactivated`), each with the person as a
+  `staff` target; `hospital_settings.changed` (`setting_changed`);
+  `hospital.model_policy_changed` (`model_policy_changed`);
+  `analysis.switch_raised` and `analysis.switch_lowered`
+  (`analysis_switched`, `facts.switched` on or off); `analysis.viewed`
+  (`analysis_viewed`); `platform.team_role_changed` and
+  `platform.team_member_removed` (`team_role_changed`, `team_removed`, a
+  `team_member` target); `platform.analytics_email_changed`
+  (`analytics_email_changed`); and the four `legal_hold.*` actions
+  (`hold_placed`, `hold_lifted`, `hold_lift_requested`,
+  `hold_lift_cancelled`, a `hold` target). No payload value (roles, codes,
+  providers, reasons, periods, filters) is sent as a fact. The vendored
+  mhai-web vocabulary is re-copied from mhai-web main with mhai-web PR #129's
+  six kinds, so `pending_in_web` is empty.
 - **HGA grounding reads a cited chunk sentence by sentence (clinical review).**
   The NLI model (`cross-encoder/nli-deberta-v3-base`) is trained on sentence
   pairs, and against a long guideline chunk it called even a sentence copied

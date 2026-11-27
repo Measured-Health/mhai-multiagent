@@ -46,8 +46,10 @@ type Target struct {
 
 // Entry is one action's catalogue row. Target, Outcome and Flag may be nil
 // (no target, "succeeded", no flag). Facts maps a payload key to the facts
-// key its value is sent under. When, if set, says which of the action's
-// rows the kind fits; any other row of the action is sent as the bare entry.
+// key its value is sent under. Set holds facts the action itself states
+// (analysis.switch_raised is the switch turned on), sent whatever the
+// payload. When, if set, says which of the action's rows the kind fits;
+// any other row of the action is sent as the bare entry.
 type Entry struct {
 	Type, Kind string
 	When       func(Event) bool
@@ -55,6 +57,7 @@ type Entry struct {
 	Outcome    func(Event) string
 	Flag       func(Event) *string
 	Facts      map[string]string
+	Set        map[string]any
 }
 
 // Mapped is the part of the contract's event the catalogue derives. The
@@ -153,6 +156,9 @@ func mapRow(row Entry, e Event) (m Mapped, ok bool) {
 		if v, present := decoded[from]; present {
 			m.Facts[to] = v
 		}
+	}
+	for k, v := range row.Set {
+		m.Facts[k] = v
 	}
 	if holdsPseudonym(m.Facts) {
 		return Mapped{}, false
@@ -282,13 +288,15 @@ var Catalogue = map[string]Entry{
 	"hospital.reactivated": {Type: "hospital_settings", Kind: "hospital_reactivated", Target: entityTarget("hospital", "hospital")},
 	"hospital.activated":   withheld(),
 	"user.created":         withheld(),
-	// Cloud model providers (Task 2): mhai-web has no kind for a model
-	// policy change yet; sent bare until it has one.
-	"hospital.model_policy_changed": withheld(),
-	// Patient Analysis (Task 4): the CLI's demo raise and its lowering. No
-	// mhai-web kind yet; the platform's switch actions come with Plan 11b.
-	"analysis.switch_raised":  withheld(),
-	"analysis.switch_lowered": withheld(),
+	// Cloud model providers (Task 2): mhai-web's model_policy_changed
+	// ("Changed the AI model"), with no target and no facts: the provider,
+	// budget and agreement stay in Activity.
+	"hospital.model_policy_changed": {Type: "platform", Kind: "model_policy_changed"},
+	// Patient Analysis (Task 4): the CLI's demo raise and its lowering of
+	// the Analysis switch, as mhai-web's analysis_switched with the
+	// direction the action states.
+	"analysis.switch_raised":  {Type: "platform", Kind: "analysis_switched", Set: map[string]any{"switched": "on"}},
+	"analysis.switch_lowered": {Type: "platform", Kind: "analysis_switched", Set: map[string]any{"switched": "off"}},
 	"hospital.marked_demo":    withheld(),
 	// The public demo's seed (core demo seed): no mhai-web kind; sent bare.
 	"demo.seeded": withheld(),
@@ -297,9 +305,9 @@ var Catalogue = map[string]Entry{
 	// mhai-web kind yet; sent bare.
 	"reference_library.loaded": withheld(),
 	// Patient Analysis reads (plan Task 10): mhai-web's analysis_viewed
-	// kind takes facts this payload doesn't carry yet (H6); sent bare until
-	// the mapping is agreed (TODO.md, "Before scale").
-	"analysis.viewed":           withheld(),
+	// ("Opened Analysis") with no facts; which facts it carries (the view,
+	// the period) is still to agree (H6). Unusual querying has no kind.
+	"analysis.viewed":           {Type: "analysis", Kind: "analysis_viewed"},
 	"analysis.unusual_querying": withheld(),
 	// The drill-down (plan Tasks 13-14): mhai-web's analysis_patients_viewed
 	// and audit_patients_viewed take facts and targets not agreed yet (H6):
@@ -314,17 +322,20 @@ var Catalogue = map[string]Entry{
 	"analysis.named_viewed":        withheld(),
 	"analysis.named_view_failed":   withheld(),
 	"analysis.named_limit_reached": withheld(),
-	// The analyst grant (plan Tasks 15-16): mhai-web's staff_role_changed
-	// takes facts not agreed for these yet (H6); sent bare until they are.
-	"analyst.granted": withheld(),
-	"analyst.removed": withheld(),
-	// The hospital admin's staff and settings changes (internal/hospital):
-	// shown on the hospital's own Activity page; for the platform app,
-	// sent bare until mhai-web's staff kinds take their facts (H6).
-	"staff.roles_changed":     withheld(),
-	"staff.specialty_changed": withheld(),
-	"staff.deactivated":       withheld(),
-	"staff.reactivated":       withheld(),
+	// The analyst grant (plan Tasks 15-16): mhai-web's staff_role_changed,
+	// the person as the target, no facts (which role changed is H6's).
+	"analyst.granted": {Type: "staff", Kind: "staff_role_changed", Target: entityTarget("staff", "user")},
+	"analyst.removed": {Type: "staff", Kind: "staff_role_changed", Target: entityTarget("staff", "user")},
+	// The hospital admin's staff and settings changes (internal/hospital),
+	// also on the hospital's own Activity page: mhai-web's staff kinds with
+	// the person as the target and no facts (the roles are H6's), and
+	// setting_changed with no target ("Changed a setting"). A specialty
+	// change has no kind.
+	"staff.roles_changed":       {Type: "staff", Kind: "staff_role_changed", Target: entityTarget("staff", "user")},
+	"staff.specialty_changed":   withheld(),
+	"staff.deactivated":         {Type: "staff", Kind: "staff_deactivated", Target: entityTarget("staff", "user")},
+	"staff.reactivated":         {Type: "staff", Kind: "staff_reactivated", Target: entityTarget("staff", "user")},
+	"hospital_settings.changed": {Type: "hospital_settings", Kind: "setting_changed"},
 	// The account and review actions (migration 00049): sent bare until
 	// mhai-web's kinds take their facts (H6), as the staff changes.
 	"staff.removed":                 withheld(),
@@ -332,10 +343,12 @@ var Catalogue = map[string]Entry{
 	"staff.mfa_reminded":            withheld(),
 	"correction.reviewer_assigned":  withheld(),
 	"correction.reviewers_reminded": withheld(),
-	"hospital_settings.changed":     withheld(),
-	// Invites and resets (migration 00050), and their redemption: sent
-	// bare until mhai-web's staff_invited and password kinds take facts.
-	"staff.invited":             withheld(),
+	// Invites and resets (migration 00050), and their redemption. An
+	// invite (a hospital admin's, or the platform's first admin) is
+	// mhai-web's staff_invited, the person as the target, no facts. A
+	// resend, a skipped address, a reset and a redemption have no kind
+	// that means them (admin_invite_resent is the first admin's only).
+	"staff.invited":             {Type: "staff", Kind: "staff_invited", Target: entityTarget("staff", "user")},
 	"staff.invite_resent":       withheld(),
 	"staff.invite_unavailable":  withheld(),
 	"staff.password_reset_sent": withheld(),
@@ -386,16 +399,17 @@ var Catalogue = map[string]Entry{
 	"emr.hospital_data_removed":    withheld(),
 	// The cloud reservation reaper (00047): no mhai-web kind; sent bare.
 	"cloud.reservation_reaped": withheld(),
-	"legal_hold.placed":        withheld(),
-	"legal_hold.lifted":        withheld(),
-	// The platform app's holds, team and e-mail setting (00037): no
-	// mhai-web audit kind agreed yet; sent bare. The activity feed
-	// (/platform/activity) shows them.
-	"legal_hold.lift_requested":        withheld(),
-	"legal_hold.lift_cancelled":        withheld(),
-	"platform.team_role_changed":       withheld(),
-	"platform.team_member_removed":     withheld(),
-	"platform.analytics_email_changed": withheld(),
+	// Legal holds, the CLI's and the platform app's (00032, 00037), the
+	// platform team and the analytics e-mail setting (00037): mhai-web's
+	// hold, team and e-mail kinds, the hold or the team member as the
+	// target, no facts (reason codes, roles and modes stay in Activity).
+	"legal_hold.placed":                {Type: "retention", Kind: "hold_placed", Target: entityTarget("hold", "legal_hold")},
+	"legal_hold.lifted":                {Type: "retention", Kind: "hold_lifted", Target: entityTarget("hold", "legal_hold")},
+	"legal_hold.lift_requested":        {Type: "retention", Kind: "hold_lift_requested", Target: entityTarget("hold", "legal_hold")},
+	"legal_hold.lift_cancelled":        {Type: "retention", Kind: "hold_lift_cancelled", Target: entityTarget("hold", "legal_hold")},
+	"platform.team_role_changed":       {Type: "staff", Kind: "team_role_changed", Target: entityTarget("team_member", "user")},
+	"platform.team_member_removed":     {Type: "staff", Kind: "team_removed", Target: entityTarget("team_member", "user")},
+	"platform.analytics_email_changed": {Type: "platform", Kind: "analytics_email_changed"},
 
 	// Alerts (EMR plan Tasks 31-34): the settings saves and an
 	// acknowledgement have mhai-web kinds (Plan 13), with no target; the
