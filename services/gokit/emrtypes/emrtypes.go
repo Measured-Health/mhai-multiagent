@@ -86,7 +86,7 @@ var Types = []TypeInfo{
 			{Key: "mrn_namespace", Label: "MRN identifier system", Kind: KindText, Max: 200},
 			recordLink,
 		}},
-	{ID: "document_archive", Label: "Scanned record archive", Summary: "Sends new scanned records for review.",
+	{ID: "document_archive", Label: "DocFlow", Summary: "Reads new scanned records from DocFlow for review.",
 		Version: 1, Fields: []Field{
 			{Key: "api_key", Label: "Access key", Kind: KindSecret, Required: true, Max: 4000},
 		}},
