@@ -8,6 +8,31 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **HGA grounding reads a cited chunk sentence by sentence (clinical review).**
+  The NLI model (`cross-encoder/nli-deberta-v3-base`) is trained on sentence
+  pairs, and against a long guideline chunk it called even a sentence copied
+  word for word from that chunk neutral (0.99), so every live citation was
+  `not_entailed`, `nli_score` was 0 and answers escalated.
+  `CitationVerificationPipeline` now scores each claim against windows of
+  its chunk (`premise_windows`: the whole chunk, each sentence, each pair of
+  adjacent sentences; at most `NLI_MAX_WINDOWS` = 24, longer chunks grouped
+  so every sentence is still read), in batched forward passes under the
+  verifier's lock (`NLIEntailmentVerifier.verify_pairs`, `windows_for`).
+  Safety first: a claim is `entailed` only when some window's entailment is
+  at least 0.7 and there is no contradiction; a contradiction (at least 0.5)
+  vetoes even an entailed claim and is `contradicted`. The contradiction
+  counted is the whole chunk's (exactly the check made before, so every
+  contradiction found before is still found) or that of the claim's own
+  sentence (`aligned_windows`: the window sharing most of the claim's
+  words). It is not the highest over every window: the model calls two
+  different facts of one source contradictory ("Hypertension defined as
+  ..." against "T2DM: fasting glucose ..."; the adult-dose sentence against
+  the pediatric-dose one), and that rule vetoed 48 of 48 claims copied word
+  for word from a long chunk, and 3 of 7 sentences copied from a
+  synthetic drug label. The thresholds are unchanged. The rule-based
+  fallback still reads the whole chunk. Before/after:
+  `scripts/hga_grounding_eval.py`.
+
 - **One renewable backup code per account (OpenAPI 1.38.0).** Enrolment and
   `POST /auth/mfa/recovery-codes` now give exactly one backup code
   (`recovery_codes` keeps its array shape, with one item), instead of ten

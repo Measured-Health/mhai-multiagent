@@ -300,7 +300,7 @@ class CollidingTokenizer:
         self._busy = threading.Lock()
         self.collisions = 0
 
-    def __call__(self, premise: str, hypothesis: str, **kwargs: Any) -> Any:
+    def __call__(self, premise: str | list[str], hypothesis: str | list[str], **kwargs: Any) -> Any:
         import torch
 
         if not self._busy.acquire(blocking=False):
@@ -308,9 +308,14 @@ class CollidingTokenizer:
             raise RuntimeError("Already borrowed")
         try:
             time.sleep(0.002)
-            words = set(re.findall(r"[a-z0-9]+", premise.lower()))
-            entailed = set(re.findall(r"[a-z0-9]+", hypothesis.lower())) <= words
-            return _Inputs(flag=torch.tensor([1.0 if entailed else 0.0]))
+            # One pair, or a batch of pairs (the verifier scores a chunk's windows at once).
+            premises = [premise] if isinstance(premise, str) else premise
+            hypotheses = [hypothesis] if isinstance(hypothesis, str) else hypothesis
+            flags = []
+            for p, h in zip(premises, hypotheses, strict=True):
+                words = set(re.findall(r"[a-z0-9]+", p.lower()))
+                flags.append(1.0 if set(re.findall(r"[a-z0-9]+", h.lower())) <= words else 0.0)
+            return _Inputs(flag=torch.tensor(flags))
         finally:
             self._busy.release()
 
@@ -321,15 +326,14 @@ class _Inputs(dict):  # type: ignore[type-arg]
 
 
 class WordOverlapNLI:
-    """Entailment when the tokenizer said every hypothesis word is in the premise."""
+    """Entailment, per pair, when the tokenizer said every hypothesis word is in the
+    premise."""
 
     def __call__(self, flag: Any) -> Any:
         import torch
 
-        logits = (
-            torch.tensor([[-5.0, 5.0, -5.0]]) if not flag[0] else torch.tensor([[-5.0, -5.0, 5.0]])
-        )
-        return types.SimpleNamespace(logits=logits)
+        rows = [[-5.0, -5.0, 5.0] if f else [-5.0, 5.0, -5.0] for f in flag.tolist()]
+        return types.SimpleNamespace(logits=torch.tensor(rows))
 
 
 class ClaimGenerator:

@@ -115,7 +115,8 @@ def test_a_cited_entailed_claim_is_entailed() -> None:
     report = pipe.verify_response(f"{CLAIM} [KB#0002].")
     (r,) = report.citation_results
     assert r.action == VerificationAction.PASS
-    assert nli.hypotheses == [f"{CLAIM}."]
+    # Once per window of the chunk (premise_windows), always without the tag.
+    assert set(nli.hypotheses) == {f"{CLAIM}."}
     # What clinicians see is unchanged: the claim keeps its tag, the source its text.
     assert r.claim_text == f"{CLAIM} [KB#0002]."
     assert r.citation_id == "KB#0002"
@@ -136,7 +137,7 @@ def test_a_claim_citing_a_chunk_that_does_not_support_it_still_fails() -> None:
     (r,) = pipe.verify_response(f"{CLAIM} [KB#0005].").citation_results
     assert r.action == VerificationAction.FLAG
     assert r.citation_id == "KB#0005"
-    assert nli.hypotheses == [f"{CLAIM}."]
+    assert set(nli.hypotheses) == {f"{CLAIM}."}
 
 
 @pytest.mark.parametrize(
@@ -249,7 +250,7 @@ def test_the_local_default_profile_scores_a_cited_claim_as_entailed(
         available=True,
     )
     _assert_grounded(_verify_with(orch, gen))
-    assert made[-1].hypotheses == [f"{CLAIM}."]
+    assert set(made[-1].hypotheses) == {f"{CLAIM}."}
 
 
 def test_the_local_default_profile_still_fails_an_uncited_claim(
@@ -287,4 +288,4 @@ def test_the_cloud_route_scores_a_cited_claim_as_entailed(
     # The tag reaches the clinician unchanged; only the NLI hypothesis loses it.
     assert gen.response == f"{CLAIM} [KB#0002]."
     _assert_grounded(client.verify(gen))
-    assert made[-1].hypotheses == [f"{CLAIM}."]
+    assert set(made[-1].hypotheses) == {f"{CLAIM}."}
