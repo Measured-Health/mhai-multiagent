@@ -439,7 +439,7 @@ fi
 compose up -d pipeline
 started=0
 for _ in $(seq 1 36); do
-  if compose logs --no-log-prefix pipeline 2>/dev/null | grep -q 'worker started service=pipeline'; then started=1; break; fi
+  if compose logs --no-log-prefix pipeline 2>/dev/null | grep 'worker started service=pipeline' >/dev/null; then started=1; break; fi
   state=$(docker inspect -f '{{.State.Status}} {{.RestartCount}}' "$(compose ps -q pipeline)" 2>/dev/null || echo "missing 0")
   case "$state" in running\ 0|created\ 0) ;; *) break ;; esac
   sleep 5

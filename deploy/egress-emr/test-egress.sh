@@ -155,10 +155,10 @@ docker run -d --name "$project-dns" --network "container:$ctr" "$probe_image" \
   sh -c 'apk add --no-cache -q tcpdump >/dev/null 2>&1 && exec tcpdump -i any -l -n -A udp 2>&1' >/dev/null
 dnspid=1
 for _ in $(seq 1 60); do
-  docker logs "$project-dns" 2>&1 | grep -q 'listening on' && break
+  docker logs "$project-dns" 2>&1 | grep 'listening on' >/dev/null && break
   sleep 1
 done
-docker logs "$project-dns" 2>&1 | grep -q 'listening on' || { echo "FAIL the DNS capture didn't start"; exit 1; }
+docker logs "$project-dns" 2>&1 | grep 'listening on' >/dev/null || { echo "FAIL the DNS capture didn't start"; exit 1; }
 
 # Wait for the proxy to listen.
 for _ in $(seq 1 30); do
@@ -244,7 +244,7 @@ leak=0
 for s in example.com iana hospital-a hospital-b "$nonce" 169.254 10.99. "$(token "$conn_a")" "$khex" Basic; do
   if printf '%s' "$logs" | grep -qF "$s"; then echo "FAIL the proxy log carries $s"; leak=1; fi
 done
-if [ "$leak" = 0 ] && printf '%s' "$logs" | grep -q '"decision":"not_listed"' && printf '%s' "$logs" | grep -q '"host_hash"'; then
+if [ "$leak" = 0 ] && printf '%s' "$logs" | grep '"decision":"not_listed"' >/dev/null && printf '%s' "$logs" | grep '"host_hash"' >/dev/null; then
   echo "ok   the proxy log: decision codes and host hashes, no host or credential"
 else
   [ "$leak" = 0 ] && echo "FAIL the proxy log lacks its decision lines"

@@ -317,7 +317,7 @@ docker compose up -d
 docker compose restart pipeline >/dev/null
 started=0
 for _ in $(seq 1 36); do
-  if docker compose logs --no-log-prefix --since "$SINCE" pipeline 2>/dev/null | grep -q 'worker started service=pipeline'; then
+  if docker compose logs --no-log-prefix --since "$SINCE" pipeline 2>/dev/null | grep 'worker started service=pipeline' >/dev/null; then
     started=1; break
   fi
   sleep 5

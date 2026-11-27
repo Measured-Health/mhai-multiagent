@@ -164,7 +164,7 @@ compose pull notifications mail-relay >/dev/null 2>&1 || info "pull skipped (ima
 compose up -d --force-recreate mail-relay notifications
 started=0
 for _ in $(seq 1 24); do
-  if compose logs --no-log-prefix notifications 2>/dev/null | grep -q 'notifications serving'; then started=1; break; fi
+  if compose logs --no-log-prefix notifications 2>/dev/null | grep 'notifications serving' >/dev/null; then started=1; break; fi
   sleep 5
 done
 if [ "$started" != 1 ]; then

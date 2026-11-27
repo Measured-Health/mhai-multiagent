@@ -113,7 +113,7 @@ fi
 waited=0
 state=unknown
 while :; do
-  if dc logs --no-log-prefix pipeline 2>/dev/null | grep -q 'worker started service=pipeline'; then break; fi
+  if dc logs --no-log-prefix pipeline 2>/dev/null | grep 'worker started service=pipeline' >/dev/null; then break; fi
   id=$(dc ps -q pipeline 2>/dev/null || true)
   state=$(docker inspect -f '{{.State.Status}} {{.RestartCount}}' "$id" 2>/dev/null || echo "missing 0")
   case "$state" in
