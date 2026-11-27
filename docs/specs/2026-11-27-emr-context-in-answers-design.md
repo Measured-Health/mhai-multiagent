@@ -88,6 +88,18 @@ clinician ─▶ GET /queries/{id}  (+ facts_used, record_status)
 - **Order and caps.** Inside each kind: abnormal first, then newest first. When a cap cuts, the count of what was left out is kept ("12 more results not used").
 - **A hard ceiling.** At most 80 facts and about 2,000 prompt tokens in total. Over that, the lowest-priority facts drop first.
 
+### 4.1a Historical records from scanned documents (owner, 27 Nov)
+
+Hospitals that keep paper records scan them with DocFlow; the documents pipeline turns those scans into values a person has reviewed (the scanned record archive connector, then the documents service, then image and PDF to text, then review), and they land in the same EMR records as connector data. They join the slice the same way, with these rules:
+
+- **Reviewed only.** A value from a scan is used only after a person accepted it in the documents review; a value still in review, rejected or detached is never used.
+- **Same filters.** The same statuses, standardised codes, closed value sets and "never in a fact" rules as §4.3. Free text from a scan (notes, letters) is never sent; it stays in the review record.
+- **A history row on top of the windows above.** Older than the §4.1 windows: the latest reviewed value per standardised analyte from the past 2 years, abnormal first, and past medicines marked as past. Cap 10, inside the 80-fact ceiling, lowest priority when the ceiling cuts. The clinical lead confirms the window and cap with §14 Q1.
+- **Labelled.** Each such fact carries `source = scanned record (reviewed)` and its date; the "From the record" panel (§8) shows it as historical, with the review date, so the clinician can tell a 2019 paper result from yesterday's lab.
+- **Purge and exclusion** apply to scanned values exactly as to connector data.
+
+Until the documents pipeline is built (TODO.md, documents section), this row is empty.
+
 ### 4.2 Relevance (recommended: deterministic, no model)
 
 v1 does not try to guess relevance from the question. It sends the same fixed slice for every question about the patient, so the clinician always knows what the model saw. A second step (§15, PR 6) may add a closed map from question topics to analyte groups (for example "kidney" or "metformin" to the renal panel), reviewed like the rules engine's code maps (EMR §9.4). It only re-orders inside the caps, so it can't hide an abnormal value.
