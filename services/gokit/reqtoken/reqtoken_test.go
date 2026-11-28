@@ -354,7 +354,8 @@ func TestMintRefusesOverCap(t *testing.T) {
 	}
 }
 
-// F10: every token carries a hospital except global jobs.
+// F10: every token carries a hospital except global jobs and the
+// platform link.
 func TestMintRefusesMissingHospital(t *testing.T) {
 	s := newSigner(t)
 	c := reqClaims()
@@ -370,6 +371,28 @@ func TestMintRefusesMissingHospital(t *testing.T) {
 	g := Claims{Aud: "pipeline", Sub: SvcCore, Rid: testRid, Kind: KindJob, Subject: "jobs.v1.global.retention_purge", Via: ViaCore}
 	if _, _, err := s.Mint(g, nil, time.Minute); err != nil {
 		t.Fatalf("global job: %v", err)
+	}
+	// The platform link is the one control call with no hospital; every
+	// other notify call still needs one.
+	pl := Claims{Aud: "notifications", Sub: SvcCore, Rid: testRid, Kind: KindReq, Subject: PlatformLinkSubject,
+		ReplyPrefix: ReplyCore, Via: ViaCore}
+	tok, _, err := s.Mint(pl, []byte("b"), time.Minute)
+	if err != nil {
+		t.Fatalf("platform link: %v", err)
+	}
+	got, err := VerifyAt(tok, s.PublicKeys(), Expect{Aud: "notifications", Subject: PlatformLinkSubject, Kind: KindReq}, []byte("b"), testNow)
+	if err != nil || got.Hid != "" {
+		t.Fatalf("platform link verify: %+v %v", got, err)
+	}
+	for _, subject := range []string{"notify.v1.ctl.send_link", "notify.v1.ctl.health", PlatformLinkSubject + "x"} {
+		c := pl
+		c.Subject = subject
+		if _, _, err := s.Mint(c, nil, time.Minute); !errors.Is(err, ErrMintHospital) {
+			t.Errorf("%s without hid: %v", subject, err)
+		}
+	}
+	if NoHospitalSubject("notify.v1.ctl.send_platform_link.x") || NoHospitalSubject("jobs.v1.x.global") {
+		t.Error("NoHospitalSubject is wider than its two shapes")
 	}
 }
 

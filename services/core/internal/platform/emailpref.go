@@ -12,10 +12,10 @@ package platform
 // The person is the token's, never the body's. Core stores the choice; it
 // sends no e-mail yet (no mail service): a gap recorded in the PR.
 //
-// The notifications bell (GET /platform/notifications, POST
-// /platform/notifications/seen), the platform settings (Plan 8c) and the
-// named-access switch (Plan 11b) have no backing feature in core: they are
-// registered with their rules and answer 501 not_implemented.
+// The named-access switch (Plan 11b) has no backing feature in core: it is
+// registered with its rules and answers 501 not_implemented (behind the
+// privacy and legal sign-offs). The notifications are notifications.go's,
+// the settings settings.go's.
 
 import (
 	"errors"
@@ -51,16 +51,6 @@ func registerNotImplemented(m *authz.Mux) {
 		method, path string
 		rule         authz.Rule
 	}{
-		{http.MethodGet, "/platform/notifications", read},
-		{http.MethodPost, "/platform/notifications/seen", write},
-		{http.MethodGet, "/platform/settings", read},
-		{http.MethodGet, "/platform/settings/retention/{id}/preview", read},
-		{http.MethodPut, "/platform/settings/retention/{id}", stepUp},
-		{http.MethodPut, "/platform/settings/retention-pause", stepUp},
-		{http.MethodPut, "/platform/settings/triage", stepUp},
-		{http.MethodPost, "/platform/settings/requests/{id}/approve", stepUp},
-		{http.MethodPost, "/platform/settings/requests/{id}/cancel", write},
-		{http.MethodPost, "/platform/settings/feedback-buffer/reset", stepUp},
 		{http.MethodGet, "/platform/named-access", read},
 		{http.MethodPost, "/platform/named-access/requests", stepUp},
 		{http.MethodPost, "/platform/named-access/requests/{id}/approve", stepUp},

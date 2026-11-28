@@ -39,10 +39,13 @@ type liveToken struct {
 func readLiveToken(ctx context.Context, tx pgx.Tx, hash string) (liveToken, error) {
 	var t liveToken
 	// The token's hospital must still be its person's (every writer keeps
-	// them equal; checked again where the token is spent).
+	// them equal; checked again where the token is spent). A platform
+	// account's invite has no hospital, and its person none either
+	// (00062); a reset link always has one.
 	err := tx.QueryRow(ctx, `SELECT t.id, t.user_id, t.purpose FROM account_tokens t JOIN users u ON u.id = t.user_id
 		WHERE t.token_hash = $1 AND t.used_at IS NULL AND t.revoked_at IS NULL AND t.expires_at > now()
-		  AND u.hospital_id = t.hospital_id`, hash).Scan(&t.ID, &t.User, &t.Purpose)
+		  AND u.hospital_id IS NOT DISTINCT FROM t.hospital_id
+		  AND (t.hospital_id IS NOT NULL OR t.purpose = 'invite')`, hash).Scan(&t.ID, &t.User, &t.Purpose)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return t, errBadToken
 	}

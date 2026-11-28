@@ -7,7 +7,8 @@
 //
 // No op admits a user, a platform role or an auditor: every op is
 // svc:core's alone. PR 2 built health and PR 5 send_link (hospital-bound:
-// the token's hid is the recipient's hospital); unsubscribe_check comes
+// the token's hid is the recipient's hospital); send_platform_link is a
+// platform team member's invite (no hospital); unsubscribe_check comes
 // with PR 7.
 package notifyops
 
@@ -55,6 +56,10 @@ var Ops = []Op{
 	// An invite or a reset, sent at once with its link in memory: up to 3
 	// tries in about 25 seconds (design §4.4).
 	hospitalBound(coreOp("send_link", 30*time.Second, "SendLink")),
+	// A platform team member's invite: the same message, for an account
+	// with no hospital, so the token names none (reqtoken's
+	// PlatformLinkSubject) and the handler reads no hospital's rows.
+	coreOp("send_platform_link", 30*time.Second, "SendLink"),
 }
 
 // Subject is op's control subject.

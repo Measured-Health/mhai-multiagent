@@ -56,6 +56,16 @@ var activityActions = map[string]string{
 	"legal_hold.lifted":             "hold_lifted",
 	"platform.team_role_changed":    "team_role_changed",
 	"platform.team_member_removed":  "team_removed",
+	"platform.team_invited":         "team_invited",
+	// Platform settings (00062).
+	"platform.retention_changed":        "retention_changed",
+	"platform.setting_change_requested": "setting_change_requested",
+	"platform.setting_change_approved":  "setting_change_approved",
+	"platform.setting_change_cancelled": "setting_change_cancelled",
+	"platform.setting_change_lapsed":    "setting_change_lapsed",
+	"platform.clean_up_paused":          "clean_up_paused",
+	"platform.clean_up_resumed":         "clean_up_resumed",
+	"platform.feedback_buffer_cleared":  "feedback_buffer_cleared",
 }
 
 func registerActivity(m *authz.Mux, d Deps) {
@@ -162,10 +172,61 @@ func activityTarget(action string, payload map[string]any, label, reference, mem
 		return reference, nil
 	case "platform.team_role_changed":
 		return member, s("role")
-	case "platform.team_member_removed":
+	case "platform.team_member_removed", "platform.team_invited":
 		return member, nil
+	case "platform.retention_changed":
+		// "Records: 6 years to 7 years", as mhai-web's sample API words it.
+		typ, from, to, ok := retentionPayload(payload)
+		if !ok {
+			return nil, nil
+		}
+		return str(retentionWords[typ] + ": " + DaysWords(from) + " to " + DaysWords(to)), nil
+	case "platform.setting_change_requested", "platform.setting_change_approved", "platform.setting_change_cancelled",
+		"platform.setting_change_lapsed":
+		typ, _, to, ok := retentionPayload(payload)
+		if !ok {
+			return nil, nil
+		}
+		return str("Shorten " + retentionWords[typ] + " to " + DaysWords(to)), nil
+	case "platform.feedback_buffer_cleared":
+		if n, ok := payload["cleared"].(float64); ok && n >= 0 {
+			if n == 1 {
+				return str("1 item"), nil
+			}
+			return str(fmt.Sprintf("%d items", int(n))), nil
+		}
+		return nil, nil
 	}
 	return nil, nil
+}
+
+// retentionPayload is a settings row's type and periods.
+func retentionPayload(payload map[string]any) (string, int, int, bool) {
+	typ, _ := payload["type"].(string)
+	from, okF := payload["from"].(float64)
+	to, okT := payload["to"].(float64)
+	if _, ok := retentionWords[typ]; !ok || !okF || !okT || from < 1 || to < 1 {
+		return "", 0, 0, false
+	}
+	return typ, int(from), int(to), true
+}
+
+// DaysWords is a period as mhai-web words it: "3 years", "6 months" or
+// "45 days".
+func DaysWords(days int) string {
+	n := func(v int, unit string) string {
+		if v == 1 {
+			return "1 " + unit
+		}
+		return fmt.Sprintf("%d %ss", v, unit)
+	}
+	switch {
+	case days%365 == 0:
+		return n(days/365, "year")
+	case days%30 == 0:
+		return n(days/30, "month")
+	}
+	return n(days, "day")
 }
 
 // activity is GET /platform/activity.

@@ -18,6 +18,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Platform settings, notifications and team invites (OpenAPI 1.43.0,
+  migration 00062).** The platform app's Settings, the bell and "Invite a
+  team member" no longer answer 501; named access stays 501.
+  - Settings: retention periods (today's placeholders), a shorter one only
+    as a request a different platform admin approves within 7 days (the
+    database refuses anything else), a preview of how many rows it would
+    cover (counts only, legal holds left out), the clean-up pause, the
+    triage gate (core has no triage: off, never ready) and the
+    learning-data reset (marks rows cleared, never deletes). No clean-up
+    deletes by these periods yet: they record the policy.
+  - Notifications: a broken audit check and What changed's open changes,
+    seen per person.
+  - Team invites: the hospital admin's invite mechanics for Measured
+    Health staff (step-up, 503 `no_delivery`, 424 `not_delivered`), sent by
+    the notifications service's new `send_platform_link` (no hospital in
+    the request token: `reqtoken.PlatformLinkSubject`).
+
 - **OpenBao, the EMR secret store (H3; plan Task 12).** Hospital connection
   credentials move to OpenBao (owner's choice, 27 Nov; on the live host
   for now), and the emr service runs as production with it.

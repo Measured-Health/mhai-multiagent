@@ -13,13 +13,14 @@ import (
 const user = "11111111-1111-4111-8111-111111111111"
 
 // The table (notifications design §7; §15 PRs 2 and 5): health and
-// send_link (hospital-bound), both called as svc:core. Each later op is
+// send_link (hospital-bound) and send_platform_link (no hospital), all
+// called as svc:core. Each later op is
 // added with its PR.
 func TestOpsTable(t *testing.T) {
 	want := map[string]struct {
 		bound   bool
 		timeout time.Duration
-	}{"health": {false, 5 * time.Second}, "send_link": {true, 30 * time.Second}}
+	}{"health": {false, 5 * time.Second}, "send_link": {true, 30 * time.Second}, "send_platform_link": {false, 30 * time.Second}}
 	if len(Ops) != len(want) {
 		t.Fatalf("%d ops", len(Ops))
 	}

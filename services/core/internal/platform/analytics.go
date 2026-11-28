@@ -237,6 +237,18 @@ func (d Deps) openChanges(ctx context.Context) (*analytics.ChangesRun, []analyti
 	var run *analytics.ChangesRun
 	var out []analytics.ChangeRow
 	err := authz.Tx(ctx, d.Pool, func(tx pgx.Tx) error {
+		var err error
+		run, out, err = openChangesIn(ctx, tx)
+		return err
+	})
+	return run, out, err
+}
+
+// openChangesIn is openChanges in tx.
+func openChangesIn(ctx context.Context, tx pgx.Tx) (*analytics.ChangesRun, []analytics.ChangeRow, error) {
+	var run *analytics.ChangesRun
+	var out []analytics.ChangeRow
+	err := func() error {
 		var wf, wt, mf, mt, at time.Time
 		err := tx.QueryRow(ctx, `SELECT week_from, week_to, month_from, month_to, evaluated_at FROM analytics_change_runs
 			ORDER BY week_from DESC LIMIT 1`).Scan(&wf, &wt, &mf, &mt, &at)
@@ -265,7 +277,7 @@ func (d Deps) openChanges(ctx context.Context) (*analytics.ChangesRun, []analyti
 			out = append(out, c)
 		}
 		return rows.Err()
-	})
+	}()
 	return run, out, err
 }
 

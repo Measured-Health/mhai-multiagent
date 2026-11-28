@@ -112,6 +112,9 @@ var Codes = map[string]int{
 	// `duplicate`), or its first admin's email is already an account's.
 	"duplicate":    http.StatusConflict,
 	"email_in_use": http.StatusConflict,
+	// Platform settings (additive): a retention period under the least the
+	// server allows.
+	"below_minimum": http.StatusUnprocessableEntity,
 }
 
 // titles and details are fixed per code. They never carry input or error
@@ -173,6 +176,7 @@ var titles = map[string]string{
 	"invalid_token":         "Link not valid",
 	"duplicate":             "Short code in use",
 	"email_in_use":          "Email in use",
+	"below_minimum":         "Below the minimum",
 }
 
 var details = map[string]string{
@@ -231,6 +235,7 @@ var details = map[string]string{
 	"invalid_token":         "This link has expired or has already been used.",
 	"duplicate":             "Another hospital already has that short code.",
 	"email_in_use":          "An account with that email already exists.",
+	"below_minimum":         "That period is shorter than the minimum allowed.",
 }
 
 // problemTypeBase prefixes the problem "type" URI.

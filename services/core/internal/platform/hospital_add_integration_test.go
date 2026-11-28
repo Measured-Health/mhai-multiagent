@@ -724,6 +724,7 @@ func TestHospitalAddGrantsHoldToTheNewHospital(t *testing.T) {
 		VALUES ($1, $2, $3, 'Synthetic', now())`, uid, existing, newEmail())
 	try("password", `INSERT INTO users (id, hospital_id, email, display_name, password_hash) VALUES ($1, $2, $3, 'S', 'x')`,
 		uid, existing, newEmail())
+	// A platform account only with its own team_invited entry (00062).
 	try("platform account", `INSERT INTO users (id, email, display_name, invited_at) VALUES ($1, $2, 'S', now())`, uid, newEmail())
 	someone := seedUser(t, existing, "", authz.RoleClinician)
 	try("role on an existing hospital", `INSERT INTO user_roles (user_id, role) VALUES ($1, 'hospital_admin')`, someone.id)

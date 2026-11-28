@@ -152,6 +152,8 @@ func Register(m *authz.Mux, d Deps) {
 	registerHolds(m, d)
 	registerEmailPref(m, d)
 	registerNotImplemented(m)
+	registerSettings(m, d)
+	registerNotifications(m, d)
 	registerModelPolicy(m, d)
 	registerEMRConnections(m, d)
 	registerEMRRuleSet(m, d)
