@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.43.0"
+  version: "1.44.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -475,7 +475,8 @@ paths:
             The password is set. `sign_in` is the app the account signs in
             to: `platform` for a platform account (a platform team member's
             invite), else `clinical`. Sent only after the link worked, so it
-            never tells whether an email has an account.
+            never tells whether an email has an account. Since 1.44.0
+            (before: 204, no body).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PasswordResetOut" }

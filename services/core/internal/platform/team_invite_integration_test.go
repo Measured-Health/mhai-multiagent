@@ -34,8 +34,9 @@ func invite(t *testing.T, h http.Handler, tok string, v any) resp {
 
 func staffEmail() string { return "synthetic.staff." + uniq() + "@measured.example" }
 
-// redeem sets the invited person's first password with the link's token.
-func redeem(t *testing.T, link string) int {
+// redeem sets the invited person's first password with the link's token,
+// and returns the status and the reply's body.
+func redeem(t *testing.T, link string) (int, string) {
 	t.Helper()
 	u, err := url.Parse(link)
 	if err != nil {
@@ -49,7 +50,7 @@ func redeem(t *testing.T, link string) int {
 	req.Header.Set("Idempotency-Key", "k-"+uniq())
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
-	return w.Code
+	return w.Code, w.Body.String()
 }
 
 func TestTeamInvite(t *testing.T) {
@@ -106,11 +107,13 @@ func TestTeamInvite(t *testing.T) {
 		t.Fatal("not pending")
 	}
 
-	// The link sets the first password, once.
-	if code := redeem(t, msgs[0].Link); code != http.StatusNoContent {
-		t.Fatalf("redeem: %d", code)
+	// The link sets the first password, once, and the reply sends a
+	// platform account to the platform app's sign-in (the link opens the
+	// clinical app's page, whose own sign-in refuses platform accounts).
+	if code, body := redeem(t, msgs[0].Link); code != http.StatusOK || body != `{"sign_in":"platform"}` {
+		t.Fatalf("redeem: %d %q", code, body)
 	}
-	if code := redeem(t, msgs[0].Link); code != http.StatusGone {
+	if code, _ := redeem(t, msgs[0].Link); code != http.StatusGone {
 		t.Errorf("redeemed twice: %d", code)
 	}
 }
@@ -179,7 +182,7 @@ func TestTeamInviteDatabaseRules(t *testing.T) {
 		VALUES (NULL, $1, 'invite', encode(sha256('synthetic-mismatch'::bytea), 'hex'), $2, now() + interval '1 day')`, clin.id, a.id); err != nil {
 		t.Fatal(err)
 	}
-	if code := redeem(t, "https://x.example/r?token=synthetic-mismatch"); code != http.StatusGone {
+	if code, _ := redeem(t, "https://x.example/r?token=synthetic-mismatch"); code != http.StatusGone {
 		t.Errorf("a hospital account redeemed a platform invite: %d", code)
 	}
 }

@@ -8,7 +8,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
-- **`POST /auth/password/reset` says where to sign in.** It now answers
+- **`POST /auth/password/reset` says where to sign in (OpenAPI 1.44.0).** It now answers
   200 `{"sign_in": "clinical" | "platform"}` instead of 204: `platform` for
   a platform account (no hospital), so a platform team member who accepts
   an invite on the clinical app's set-password page is sent to the
