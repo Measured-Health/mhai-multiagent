@@ -15,7 +15,7 @@ func TestPreviewRound(t *testing.T) {
 // separator character but a newline (mhai-web's NOTE rule).
 func TestSettingReason(t *testing.T) {
 	for in, want := range map[string]bool{"Synthetic": true, "  two\nlines  ": true, "": false, "   ": false,
-		"bell\a": false, "tab\there": false, "zero​width": false, "line sep": false, "para sep": false} {
+		"bell\a": false, "tab\there": false, "zero\u200bwidth": false, "line\u2028sep": false, "para\u2029sep": false} {
 		if _, ok := settingReason(in, 500); ok != want {
 			t.Errorf("settingReason(%q) = %v", in, ok)
 		}
