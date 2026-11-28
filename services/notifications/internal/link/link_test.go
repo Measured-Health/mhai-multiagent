@@ -196,3 +196,73 @@ func TestRetriesAndHospitalLimit(t *testing.T) {
 		t.Fatal("defaults")
 	}
 }
+
+type fakePlatform struct {
+	found   bool
+	err     error
+	purpose string
+	user    uuid.UUID
+}
+
+func (f *fakePlatform) PlatformRecipient(_ context.Context, user uuid.UUID, purpose string) (string, bool, error) {
+	f.user, f.purpose = user, purpose
+	return "synthetic-staff@example.test", f.found, f.err
+}
+
+// A platform team member's invite (send_platform_link): no hospital in the
+// token, an invite only, the address the platform definer names, sent as
+// from Measured Health, never through the hospital store.
+func TestPlatformInvite(t *testing.T) {
+	h, st, em, logs := rig()
+	pf := &fakePlatform{found: true}
+	h.Platform = pf
+	user := uuid.NewString()
+	core := reqtoken.Claims{Sub: reqtoken.SvcCore}
+	if got := outcome(h.HandlePlatform(context.Background(), core, req(user, "invite"))); got != Accepted {
+		t.Fatal(got)
+	}
+	if len(em.sends) != 1 || em.sends[0].Address != "synthetic-staff@example.test" || em.sends[0].HospitalName != PlatformSender ||
+		em.sends[0].Hospital != uuid.Nil || em.sends[0].Link != secretLink || pf.purpose != "invite" || pf.user.String() != user ||
+		st.purpose != "" {
+		t.Fatalf("%+v %+v %+v", em.sends, pf, st)
+	}
+	if strings.Contains(logs.String(), "SYNTHlinkValue") || strings.Contains(logs.String(), "synthetic-staff") {
+		t.Fatal("the log carries the link or the address")
+	}
+	for name, tc := range map[string]struct {
+		edit   func(*Handler, *fakePlatform)
+		claims reqtoken.Claims
+		req    proto.Message
+		want   string
+	}{
+		"a hospital token": {nil, claims(), req(user, "invite"), Invalid},
+		"a reset":          {nil, core, req(user, "password_reset"), Invalid},
+		"no store":         {func(h *Handler, _ *fakePlatform) { h.Platform = nil }, core, req(user, "invite"), Invalid},
+		"nobody":           {func(_ *Handler, p *fakePlatform) { p.found = false }, core, req(user, "invite"), NoRecipient},
+		"database down":    {func(_ *Handler, p *fakePlatform) { p.err = errors.New("synthetic") }, core, req(user, "invite"), NotReady},
+		"email off":        {func(h *Handler, _ *fakePlatform) { h.Email = nil }, core, req(user, "invite"), NotReady},
+		"wrong message":    {nil, core, &notifypb.HealthRequest{}, Invalid},
+		"not a uuid":       {nil, core, req("someone@example.test", "invite"), Invalid},
+	} {
+		h, _, em, _ := rig()
+		p := &fakePlatform{found: true}
+		h.Platform = p
+		if tc.edit != nil {
+			tc.edit(h, p)
+		}
+		if got := outcome(h.HandlePlatform(context.Background(), tc.claims, tc.req)); got != tc.want || len(em.sends) != 0 {
+			t.Errorf("%s: %s, %d sends", name, got, len(em.sends))
+		}
+	}
+	// The platform's links share one bucket a minute.
+	h, _, _, _ = rig()
+	h.Platform = &fakePlatform{found: true}
+	for i := 0; i < PerHospitalPerMinute; i++ {
+		if got := outcome(h.HandlePlatform(context.Background(), core, req(uuid.NewString(), "invite"))); got != Accepted {
+			t.Fatalf("link %d: %s", i, got)
+		}
+	}
+	if got := outcome(h.HandlePlatform(context.Background(), core, req(uuid.NewString(), "invite"))); got != RateLimited {
+		t.Fatalf("over the minute: %s", got)
+	}
+}

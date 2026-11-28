@@ -94,11 +94,14 @@ func (p PG) Recipient(ctx context.Context, hospital, user uuid.UUID, purpose str
 
 // Handler serves send_link.
 type Handler struct {
-	Store  Store
-	Email  channel.Channel // nil: email is off, nothing is sent
-	Limits deliver.Limits
-	Log    *slog.Logger
-	Now    func() time.Time
+	Store Store
+	// Platform reads a platform invite's recipient (HandlePlatform); nil
+	// refuses every platform link as invalid.
+	Platform PlatformStore
+	Email    channel.Channel // nil: email is off, nothing is sent
+	Limits   deliver.Limits
+	Log      *slog.Logger
+	Now      func() time.Time
 	// Sleep waits between tries (tests); nil sleeps.
 	Sleep func(context.Context, time.Duration)
 
@@ -192,18 +195,98 @@ func (h *Handler) Handle(ctx context.Context, c reqtoken.Claims, req proto.Messa
 	}
 	m := channel.Message{ID: uuid.New(), Hospital: hospital, Recipient: user, Kind: kind, Address: addr,
 		Link: r.GetLink(), Expires: templates.FormatExpiry(exp), HospitalName: name}
+	return h.send(ctx, m), nil
+}
+
+// PlatformSender is the name a platform team member's invite comes from:
+// the account belongs to no hospital.
+const PlatformSender = "Measured Health"
+
+// PlatformStore is what HandlePlatform needs of the database.
+type PlatformStore interface {
+	// PlatformRecipient is notify_platform_link_recipient: the address of
+	// a platform account with a live invite made in the last 2 minutes;
+	// ok false for nobody.
+	PlatformRecipient(ctx context.Context, user uuid.UUID, purpose string) (address string, ok bool, err error)
+}
+
+// PlatformRecipient calls notify_platform_link_recipient as mhai_notify
+// with no hospital set: the definer reads only platform accounts.
+func (p PG) PlatformRecipient(ctx context.Context, user uuid.UUID, purpose string) (string, bool, error) {
+	tx, err := p.Pool.Begin(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, "SET LOCAL ROLE "+string(dbx.Notify)); err != nil {
+		return "", false, err
+	}
+	var addr string
+	err = tx.QueryRow(ctx, `SELECT address FROM notify_platform_link_recipient($1, $2)`, user, purpose).Scan(&addr)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return "", false, nil
+	case err != nil:
+		return "", false, err
+	}
+	return addr, true, tx.Commit(ctx)
+}
+
+// HandlePlatform serves send_platform_link: a platform team member's
+// invite, for an account with no hospital. The token names no hospital
+// (the responder checked it is core's, for this subject); one that names
+// one is refused as invalid. Only an invite; the platform's links share
+// one bucket of PerHospitalPerMinute a minute (the nil hospital). The
+// per-person hourly allowance (message_send_counts) is per hospital, so it
+// doesn't apply: core makes a new account per invite (an email is never
+// invited twice) and holds every invite to its step-up and a minute's
+// limit per session.
+func (h *Handler) HandlePlatform(ctx context.Context, c reqtoken.Claims, req proto.Message) (proto.Message, error) {
+	r, ok := req.(*notifypb.SendLinkRequest)
+	if c.Hid != "" || !ok || h.Platform == nil {
+		return h.done("", uuid.Nil, uuid.Nil, Invalid), nil
+	}
+	now := h.now()
+	user, ok := canonical(r.GetUserId())
+	kind := r.GetPurpose()
+	exp := time.Unix(r.GetExpiresAt(), 0)
+	if !ok || kind != "invite" || r.GetLink() == "" || len(r.GetLink()) > 2048 ||
+		!exp.After(now) || exp.After(now.Add(7*24*time.Hour+time.Minute)) {
+		return h.done(kind, uuid.Nil, user, Invalid), nil
+	}
+	if h.Email == nil {
+		return h.done(kind, uuid.Nil, user, NotReady), nil
+	}
+	if !h.allow(uuid.Nil, now) {
+		return h.done(kind, uuid.Nil, user, RateLimited), nil
+	}
+	addr, found, err := h.Platform.PlatformRecipient(ctx, user, kind)
+	switch {
+	case err != nil:
+		return h.done(kind, uuid.Nil, user, NotReady), nil
+	case !found:
+		return h.done(kind, uuid.Nil, user, NoRecipient), nil
+	}
+	m := channel.Message{ID: uuid.New(), Recipient: user, Kind: kind, Address: addr,
+		Link: r.GetLink(), Expires: templates.FormatExpiry(exp), HospitalName: PlatformSender}
+	return h.send(ctx, m), nil
+}
+
+// send tries m up to 3 times and answers the outcome.
+func (h *Handler) send(ctx context.Context, m channel.Message) proto.Message {
+	kind, hospital, user := m.Kind, m.Hospital, m.Recipient
 	for i := 0; ; i++ {
 		tctx, cancel := context.WithTimeout(ctx, tryTimeout)
 		res, err := h.Email.Send(tctx, m)
 		cancel()
 		switch {
 		case err == nil && res.Outcome == channel.Accepted:
-			return h.done(kind, hospital, user, Accepted), nil
+			return h.done(kind, hospital, user, Accepted)
 		case err == nil && res.Outcome == channel.Permanent:
-			return h.done(kind, hospital, user, Failed), nil
+			return h.done(kind, hospital, user, Failed)
 		}
 		if i >= len(waits) || ctx.Err() != nil {
-			return h.done(kind, hospital, user, Failed), nil
+			return h.done(kind, hospital, user, Failed)
 		}
 		h.sleep(ctx, waits[i])
 	}

@@ -65,8 +65,33 @@ NEW_TYPE_OPS = {("GET", "/platform/emr/connector-types")}
 NEW_TYPE_TEXT = re.compile(
     r"^added the new `hl7v2_file` enum value to the `types/items/id` response property for the response status `200`$"
 )
+# OpenAPI 1.43.0 (27 Nov 2026, owner's "keep building"): the platform
+# settings and team-invite operations, declared in 1.26.0 with placeholder
+# bodies ({type: object}) and answering only 501 not_implemented, get their
+# real request bodies, the preview's days query and their real success
+# statuses (202 for a request or the reset, 201 for an invite). No client
+# ever had a successful call to break, and the one reader (the platform
+# BFF, mhai-web) already sends these shapes. This matches only these
+# findings on exactly these operations; any other change to them, or any
+# finding on another operation, still fails.
+SERVED_IDS = {"new-required-request-property", "new-required-request-parameter", "response-success-status-removed"}
+SERVED_OPS = {
+    ("GET", "/platform/settings/retention/{id}/preview"),
+    ("PUT", "/platform/settings/retention/{id}"),
+    ("PUT", "/platform/settings/retention-pause"),
+    ("PUT", "/platform/settings/triage"),
+    ("POST", "/platform/settings/requests/{id}/approve"),
+    ("POST", "/platform/settings/requests/{id}/cancel"),
+    ("POST", "/platform/settings/feedback-buffer/reset"),
+    ("POST", "/platform/team/invites"),
+}
+SERVED_TEXT = re.compile(
+    r"^(added the new required request property `[a-z_]+`"
+    r"|added the new required `query` request parameter `days`"
+    r"|removed the success response with the status `200`)$"
+)
 findings = json.load(open(sys.argv[1])) or []
-kept, allowed, one_code, new_type = [], 0, 0, 0
+kept, allowed, one_code, new_type, served = [], 0, 0, 0, 0
 for f in findings:
     if f.get("id") == ALLOWED_ID and ALLOWED_TEXT.match(f.get("text", "")):
         allowed += 1
@@ -76,8 +101,13 @@ for f in findings:
     elif (f.get("id") == NEW_TYPE_ID and (f.get("operation"), f.get("path")) in NEW_TYPE_OPS
           and NEW_TYPE_TEXT.match(f.get("text", ""))):
         new_type += 1
+    elif (f.get("id") in SERVED_IDS and (f.get("operation"), f.get("path")) in SERVED_OPS
+          and SERVED_TEXT.match(f.get("text", ""))):
+        served += 1
     else:
         kept.append(f)
+if served:
+    print(f"openapi-breaking: {served} finding(s) on the formerly 501 settings and invite operations allowed (OpenAPI 1.43.0)")
 if one_code:
     print(f"openapi-breaking: {one_code} recovery_codes minItems 10 -> 1 finding(s) allowed (one backup code, 24 Nov 2026)")
 if new_type:

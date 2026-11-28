@@ -410,6 +410,18 @@ var Catalogue = map[string]Entry{
 	"platform.team_role_changed":       {Type: "staff", Kind: "team_role_changed", Target: entityTarget("team_member", "user")},
 	"platform.team_member_removed":     {Type: "staff", Kind: "team_removed", Target: entityTarget("team_member", "user")},
 	"platform.analytics_email_changed": {Type: "platform", Kind: "analytics_email_changed"},
+	// Platform settings and team invites (00062): mhai-web's settings
+	// kinds; a request's target is the request (a setting), an invite's the
+	// new member. No facts: periods and reasons stay in Activity.
+	"platform.team_invited":             {Type: "staff", Kind: "team_invited", Target: entityTarget("team_member", "user")},
+	"platform.retention_changed":        {Type: "platform", Kind: "retention_changed"},
+	"platform.setting_change_requested": {Type: "platform", Kind: "setting_change_requested", Target: entityTarget("setting", "setting_request")},
+	"platform.setting_change_approved":  {Type: "platform", Kind: "setting_change_approved", Target: entityTarget("setting", "setting_request")},
+	"platform.setting_change_cancelled": {Type: "platform", Kind: "setting_change_cancelled", Target: entityTarget("setting", "setting_request")},
+	"platform.setting_change_lapsed":    {Type: "platform", Kind: "setting_change_lapsed", Target: entityTarget("setting", "setting_request")},
+	"platform.clean_up_paused":          {Type: "platform", Kind: "clean_up_paused"},
+	"platform.clean_up_resumed":         {Type: "platform", Kind: "clean_up_resumed"},
+	"platform.feedback_buffer_cleared":  {Type: "platform", Kind: "feedback_buffer_cleared"},
 
 	// Alerts (EMR plan Tasks 31-34): the settings saves and an
 	// acknowledgement have mhai-web kinds (Plan 13), with no target; the

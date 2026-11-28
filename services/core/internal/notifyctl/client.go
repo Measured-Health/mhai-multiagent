@@ -4,7 +4,8 @@
 // invites and reset links to the service.
 //
 // Every call carries a request token core mints here: aud notifications,
-// sub svc:core, the hospital the message is for, the op's subject, reply
+// sub svc:core, the hospital the message is for (none for a platform team
+// member's invite, send_platform_link), the op's subject, reply
 // prefix _INBOX_gateway. and the body's hash. A secret link travels only
 // in that request's body, by NATS request/reply (never JetStream), and is
 // never logged; the service holds it in memory only. A refused request is
@@ -70,8 +71,17 @@ func (c *Client) log() *slog.Logger {
 func (c *Client) Request(ctx context.Context, hospital uuid.UUID, rid, opName string, req, resp proto.Message) error {
 	op, ok := notifyops.Lookup(notifyops.Subject(opName))
 	if !ok || req == nil || resp == nil || string(proto.MessageName(req)) != op.Request ||
-		string(proto.MessageName(resp)) != op.Response || hospital == uuid.Nil || rid == "" || len(rid) > 128 {
+		string(proto.MessageName(resp)) != op.Response || rid == "" || len(rid) > 128 {
 		return ErrMisuse
+	}
+	// Every call names a hospital but the platform link, which names none.
+	platform := notifyops.Subject(op.Op) == reqtoken.PlatformLinkSubject
+	if (hospital == uuid.Nil) != platform {
+		return ErrMisuse
+	}
+	hid := ""
+	if !platform {
+		hid = hospital.String()
 	}
 	if c.NC == nil || !strings.HasPrefix(c.NC.NewRespInbox(), reqtoken.ReplyCore) {
 		return ErrMisuse
@@ -90,7 +100,7 @@ func (c *Client) Request(ctx context.Context, hospital uuid.UUID, rid, opName st
 		return ErrMisuse
 	}
 	subject := notifyops.Subject(op.Op)
-	tok, _, err := c.Signer.Mint(reqtoken.Claims{Aud: audience, Sub: reqtoken.SvcCore, Hid: hospital.String(), Rid: rid,
+	tok, _, err := c.Signer.Mint(reqtoken.Claims{Aud: audience, Sub: reqtoken.SvcCore, Hid: hid, Rid: rid,
 		Kind: reqtoken.KindReq, Subject: subject, ReplyPrefix: reqtoken.ReplyCore, Via: reqtoken.ViaCore}, body, ttl)
 	if err != nil {
 		c.log().Error("notifyctl: refused to mint", "op", op.Name, "request_id", rid)
@@ -146,8 +156,16 @@ func (s Sender) Send(ctx context.Context, m delivery.Message) error {
 	if rid == "" {
 		rid = uuid.NewString()
 	}
+	// A platform team member's invite has no hospital: send_platform_link.
+	op := "send_link"
+	if m.HospitalID == uuid.Nil {
+		if m.Kind != delivery.Invite {
+			return ErrMisuse
+		}
+		op = "send_platform_link"
+	}
 	var rep notifypb.SendLinkReply
-	err := s.Client.Request(ctx, m.HospitalID, rid, "send_link", &notifypb.SendLinkRequest{UserId: m.Recipient.String(),
+	err := s.Client.Request(ctx, m.HospitalID, rid, op, &notifypb.SendLinkRequest{UserId: m.Recipient.String(),
 		Purpose: string(m.Kind), Link: m.Link, ExpiresAt: m.ExpiresAt.Unix()}, &rep)
 	if err != nil {
 		return err

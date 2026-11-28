@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: MHAI core service
-  version: "1.42.0"
+  version: "1.43.0"
   x-logo:
     url: /api/docs/logo.png
     altText: Measured Health
@@ -4571,14 +4571,22 @@ paths:
   /platform/team/invites:
     post:
       operationId: invitePlatformTeam
-      summary: "Invite a platform team member (not implemented)."
+      summary: "Invite a platform team member (step-up)."
       description: |
-        Answers 501 `not_implemented`: core has no backing feature for this yet
-        (the platform admin routes PR lists the gap). The caller's role, audience
-        and two-step are checked first. Added in 1.26.0.
+        Platform admins, with step-up (an invite can make a platform admin).
+        `role` is `platform_admin` or `auditor`; `name` 1 to 120 characters;
+        an email any account already has is 409 `duplicate` (before a code is
+        spent). With no sender configured, 503 `no_delivery` and nothing
+        changes. Makes the account (no hospital, no password), its role and an
+        invite link valid 3 days, audited `platform.team_invited`; the link
+        goes to the notifications service after commit
+        (`notify.v1.ctl.send_platform_link`). If it isn't accepted the member
+        stays invited and the reply is 424 `not_delivered`. The member is
+        `invite_pending` until their first sign-in. 10 team writes a minute per
+        session. Added in 1.26.0; served since 1.43.0.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, internal_error, mfa_invalid, mfa_locked, not_ready, duplicate, rate_limited, no_delivery, not_delivered]
       parameters:
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
@@ -4588,18 +4596,28 @@ paths:
         content:
           application/json:
             schema:
-              { type: object }
+              type: object
+              required: [name, email, role]
+              additionalProperties: false
+              properties:
+                name: { type: string, minLength: 1, maxLength: 120 }
+                email: { type: string, format: email }
+                role: { type: string, enum: [platform_admin, auditor] }
+                mfa_code: { type: string }
+                backup_code: { type: string }
       responses:
-        "200":
-          description: The result.
+        "201":
+          description: The invited member.
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/TeamMember" }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "424": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
-        "501": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
   /platform/team/{id}:
@@ -5095,41 +5113,46 @@ paths:
   /platform/notifications:
     get:
       operationId: listPlatformNotifications
-      summary: "The bell's notifications (not implemented)."
+      summary: "The bell's notifications."
       description: |
-        Answers 501 `not_implemented`: core has no backing feature for this yet
-        (the platform admin routes PR lists the gap). The caller's role, audience
-        and two-step are checked first. Added in 1.26.0.
+        Platform admins and auditors. At most 20 items, a broken audit check
+        first (`audit_integrity`: the newest finished check, when it came back
+        broken), then What changed's open changes (`analytics_change`, one per
+        change of the newest weekly evaluation, exactly as
+        `GET /platform/analytics` sends them; newest flagged first). `unseen`
+        counts ALL of the caller's unseen ones. Seen is per person. Counts,
+        codes, ids and hospital names only. Not audited. Added in 1.26.0;
+        served since 1.43.0.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, internal_error]
       parameters:
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
       responses:
         "200":
-          description: The result.
+          description: The notifications.
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/PlatformNotifications" }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
-        "501": { $ref: "#/components/responses/Problem" }
-        "503": { $ref: "#/components/responses/Problem" }
 
   /platform/notifications/seen:
     post:
       operationId: markPlatformNotificationsSeen
-      summary: "Mark notifications seen (not implemented)."
+      summary: "Mark notifications seen."
       description: |
-        Answers 501 `not_implemented`: core has no backing feature for this yet
-        (the platform admin routes PR lists the gap). The caller's role, audience
-        and two-step are checked first. Added in 1.26.0.
+        Platform admins (an auditor is 403: core's write rule). Marks the given
+        notifications seen for the caller, or every current one when `ids` is
+        left out; an id that isn't a current notification is ignored. Not
+        audited (the caller's own read state). Added in 1.26.0; served since
+        1.43.0.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, internal_error]
       parameters:
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
@@ -5139,88 +5162,100 @@ paths:
         content:
           application/json:
             schema:
-              { type: object }
+              type: object
+              required: []
+              additionalProperties: false
+              properties:
+                ids: { type: array, maxItems: 200, items: { type: string } }
       responses:
         "200":
-          description: The result.
+          description: How many are still unseen.
           content:
             application/json:
-              schema: { type: object }
+              schema: { type: object, required: [unseen], additionalProperties: false, properties: { unseen: { type: integer, minimum: 0 } } }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
-        "501": { $ref: "#/components/responses/Problem" }
-        "503": { $ref: "#/components/responses/Problem" }
 
   /platform/settings:
     get:
       operationId: getPlatformSettings
-      summary: "Platform settings (not implemented)."
+      summary: "Platform settings."
       description: |
-        Answers 501 `not_implemented`: core has no backing feature for this yet
-        (the platform admin routes PR lists the gap). The caller's role, audience
-        and two-step are checked first. Added in 1.26.0.
+        Platform admins and auditors: retention (today's placeholder periods,
+        `confirmed` false, `last_run` and `next_run_at` null: no clean-up
+        deletes by these periods yet), triage (core has none: off, never ready,
+        `not_ready_reason` `missing_files`), the learning-data buffer and the
+        waiting two-person requests (`requested_by_you` per caller; a lapsed
+        one isn't listed). Added in 1.26.0; served since 1.43.0.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, internal_error]
       parameters:
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
       responses:
         "200":
-          description: The result.
+          description: The whole settings, as GET reads them.
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/PlatformSettings" }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
-        "501": { $ref: "#/components/responses/Problem" }
-        "503": { $ref: "#/components/responses/Problem" }
 
   /platform/settings/retention/{id}/preview:
     get:
       operationId: previewPlatformRetention
-      summary: "Preview a retention change (not implemented)."
+      summary: "How many rows a shorter period would cover."
       description: |
-        Answers 501 `not_implemented`: core has no backing feature for this yet
-        (the platform admin routes PR lists the gap). The caller's role, audience
-        and two-step are checked first. Added in 1.26.0.
+        Platform admins and auditors. `days` is a whole number of days (1 to
+        36500, no leading zero); 0 when it isn't shorter than the current
+        period. Rows older than it, every hospital with an open legal hold
+        left out: questions and answers (`records`), documents not purged,
+        corrections waiting for review (`pending_corrections`), audit entries.
+        Counts only. Added in 1.26.0; served since 1.43.0.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, internal_error, not_found]
       parameters:
-        - { name: id, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
+        - { name: id, in: path, required: true, description: "The record type: records, documents, pending_corrections or audit_log (else 404).", schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
+        - { name: days, in: query, required: true, schema: { type: integer, minimum: 1, maximum: 36500 } }
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
       responses:
         "200":
-          description: The result.
+          description: The count.
           content:
             application/json:
-              schema: { type: object }
+              schema: { type: object, required: [would_delete], additionalProperties: false, properties: { would_delete: { type: integer, minimum: 0 } } }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
-        "501": { $ref: "#/components/responses/Problem" }
-        "503": { $ref: "#/components/responses/Problem" }
 
   /platform/settings/retention/{id}:
     put:
       operationId: setPlatformRetention
-      summary: "Set a retention period (not implemented)."
+      summary: "Change a retention period (step-up; shorter needs two people)."
       description: |
-        Answers 501 `not_implemented`: core has no backing feature for this yet
-        (the platform admin routes PR lists the gap). The caller's role, audience
-        and two-step are checked first. Added in 1.26.0.
+        Platform admins, with step-up. Longer applies at once (200) and ends a
+        shorter request waiting on the type. Shorter makes a request (202) a
+        different platform admin approves within 7 days; until then the old
+        period applies. Refusals, before a code is spent: a stale `version`,
+        or a second shorter request for the type, 409 `conflict`; under the
+        minimum 422 `below_minimum`; the same period 422 `validation_failed`.
+        Audited `platform.retention_changed` or
+        `platform.setting_change_requested`. 10 settings writes a minute per
+        session. Added in 1.26.0; served since 1.43.0.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, internal_error, mfa_invalid, mfa_locked, not_ready, not_found, conflict, below_minimum, rate_limited]
       parameters:
-        - { name: id, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
+        - { name: id, in: path, required: true, description: "The record type: records, documents, pending_corrections or audit_log (else 404).", schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -5229,31 +5264,47 @@ paths:
         content:
           application/json:
             schema:
-              { type: object }
+              type: object
+              required: [days, reason, version]
+              additionalProperties: false
+              properties:
+                days: { type: integer, minimum: 1, maximum: 36500 }
+                reason: { type: string, minLength: 1, maxLength: 500, description: "Trimmed; no control character but a newline. Kept in platform_setting_log, never in the audit entry." }
+                version: { type: integer, minimum: 1 }
+                mfa_code: { type: string }
+                backup_code: { type: string }
       responses:
         "200":
-          description: The result.
+          description: Applied at once (longer).
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/PlatformSettings" }
+        "202":
+          description: The request made (shorter); the period is unchanged until approved.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformSettings" }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
-        "501": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
   /platform/settings/retention-pause:
     put:
       operationId: setPlatformCleanUpPaused
-      summary: "Pause clean-up (not implemented)."
+      summary: "Pause or resume the clean-up (step-up)."
       description: |
-        Answers 501 `not_implemented`: core has no backing feature for this yet
-        (the platform admin routes PR lists the gap). The caller's role, audience
-        and two-step are checked first. Added in 1.26.0.
+        One platform admin, with step-up, at once (pausing only ever keeps
+        more). `version` is the pause's own; a stale one, or the state asked
+        for already, is 409 `conflict`. Audited `platform.clean_up_paused` or
+        `platform.clean_up_resumed`. Added in 1.26.0; served since 1.43.0.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, internal_error, mfa_invalid, mfa_locked, not_ready, conflict, rate_limited]
       parameters:
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
@@ -5263,31 +5314,43 @@ paths:
         content:
           application/json:
             schema:
-              { type: object }
+              type: object
+              required: [paused, reason, version]
+              additionalProperties: false
+              properties:
+                paused: { type: boolean }
+                reason: { type: string, minLength: 1, maxLength: 500, description: "Trimmed; no control character but a newline. Kept in platform_setting_log, never in the audit entry." }
+                version: { type: integer, minimum: 1 }
+                mfa_code: { type: string }
+                backup_code: { type: string }
       responses:
         "200":
-          description: The result.
+          description: The whole settings, as GET reads them.
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/PlatformSettings" }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
-        "501": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
   /platform/settings/triage:
     put:
       operationId: setPlatformTriage
-      summary: "Triage switch (not implemented)."
+      summary: "The triage gate (core has no triage)."
       description: |
-        Answers 501 `not_implemented`: core has no backing feature for this yet
-        (the platform admin routes PR lists the gap). The caller's role, audience
-        and two-step are checked first. Added in 1.26.0.
+        Platform admins. Core has no triage, so triage is always off and never
+        ready: switching off is 409 `conflict` (already off), switching on 503
+        `not_ready` (mhai-web's contract says 409; `not_ready` is a 503 code in
+        core), a stale `version` 409 `conflict`, all before a code is spent.
+        On needs `clinical_signoff` (1 to 200 characters). Nothing is changed
+        or audited. Added in 1.26.0; served since 1.43.0.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, internal_error, not_ready, conflict]
       parameters:
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
@@ -5297,33 +5360,47 @@ paths:
         content:
           application/json:
             schema:
-              { type: object }
+              type: object
+              required: [enabled, reason, version]
+              additionalProperties: false
+              properties:
+                enabled: { type: boolean }
+                reason: { type: string, minLength: 1, maxLength: 500, description: "Trimmed; no control character but a newline. Kept in platform_setting_log, never in the audit entry." }
+                clinical_signoff: { type: string, minLength: 1, maxLength: 200 }
+                version: { type: integer, minimum: 1 }
+                mfa_code: { type: string }
+                backup_code: { type: string }
       responses:
         "200":
-          description: The result.
+          description: Never sent; every call is refused.
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/PlatformSettings" }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
-        "501": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
   /platform/settings/requests/{id}/approve:
     post:
       operationId: approvePlatformSettingRequest
-      summary: "Approve a setting change (not implemented)."
+      summary: "Approve a shorter period (a different admin, step-up)."
       description: |
-        Answers 501 `not_implemented`: core has no backing feature for this yet
-        (the platform admin routes PR lists the gap). The caller's role, audience
-        and two-step are checked first. Added in 1.26.0.
+        A different platform admin than the requester (409 `same_person`),
+        with step-up, within 7 days (409 `expired`), with the setting's
+        current `version` (409 `conflict`), while the requester is still an
+        active platform admin and the period still the one it shortens (409
+        `conflict`); an approved, cancelled or replaced request is 409
+        `conflict`. The period changes at once. The database refuses a shorter
+        period without such an approval (00062). Audited
+        `platform.setting_change_approved`. Added in 1.26.0; served since 1.43.0.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, internal_error, mfa_invalid, mfa_locked, not_ready, not_found, conflict, same_person, expired, rate_limited]
       parameters:
-        - { name: id, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
+        - { name: id, in: path, required: true, description: "The request id (a uuid; else 404).", schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -5332,33 +5409,42 @@ paths:
         content:
           application/json:
             schema:
-              { type: object }
+              type: object
+              required: [version]
+              additionalProperties: false
+              properties:
+                version: { type: integer, minimum: 1 }
+                mfa_code: { type: string }
+                backup_code: { type: string }
       responses:
         "200":
-          description: The result.
+          description: The whole settings, as GET reads them.
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/PlatformSettings" }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
-        "501": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
   /platform/settings/requests/{id}/cancel:
     post:
       operationId: cancelPlatformSettingRequest
-      summary: "Cancel a setting change (not implemented)."
+      summary: "Cancel a waiting request (either admin, no step-up)."
       description: |
-        Answers 501 `not_implemented`: core has no backing feature for this yet
-        (the platform admin routes PR lists the gap). The caller's role, audience
-        and two-step are checked first. Added in 1.26.0.
+        Either platform admin, no step-up, with the setting's current
+        `version` (409 `conflict`); a request no longer waiting (approved,
+        cancelled, replaced or lapsed) is 409 `conflict`. Audited
+        `platform.setting_change_cancelled`. Added in 1.26.0; served since 1.43.0.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, internal_error, not_ready, not_found, conflict, rate_limited]
       parameters:
-        - { name: id, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
+        - { name: id, in: path, required: true, description: "The request id (a uuid; else 404).", schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -5367,31 +5453,40 @@ paths:
         content:
           application/json:
             schema:
-              { type: object }
+              type: object
+              required: [version]
+              additionalProperties: false
+              properties:
+                version: { type: integer, minimum: 1 }
       responses:
         "200":
-          description: The result.
+          description: The whole settings, as GET reads them.
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/PlatformSettings" }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
-        "501": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
   /platform/settings/feedback-buffer/reset:
     post:
       operationId: resetPlatformFeedbackBuffer
-      summary: "Clear the feedback buffer (not implemented)."
+      summary: "Clear the learning-data buffer (step-up)."
       description: |
-        Answers 501 `not_implemented`: core has no backing feature for this yet
-        (the platform admin routes PR lists the gap). The caller's role, audience
-        and two-step are checked first. Added in 1.26.0.
+        One platform admin, with step-up. Marks every waiting row of the
+        learning buffer cleared (no row is deleted) and records who, when and
+        why. It runs in the request, so the settings read after it show it
+        done (`running` and `failed_job_id` are always null). Audited
+        `platform.feedback_buffer_cleared` with the count. Added in 1.26.0;
+        served since 1.43.0.
       tags: [platform]
       security: [{ ServiceKey: [], Bearer: [] }]
-      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, not_ready, internal_error, not_implemented]
+      x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, internal_error, mfa_invalid, mfa_locked, not_ready, rate_limited]
       parameters:
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
@@ -5401,18 +5496,24 @@ paths:
         content:
           application/json:
             schema:
-              { type: object }
+              type: object
+              required: [reason]
+              additionalProperties: false
+              properties:
+                reason: { type: string, minLength: 1, maxLength: 500, description: "Trimmed; no control character but a newline. Kept in platform_setting_log, never in the audit entry." }
+                mfa_code: { type: string }
+                backup_code: { type: string }
       responses:
-        "200":
-          description: The result.
+        "202":
+          description: Done; the reset's id.
           content:
             application/json:
-              schema: { type: object }
+              schema: { type: object, required: [job_id], additionalProperties: false, properties: { job_id: { type: string, pattern: "^j_[0-9a-f-]{36}$" } } }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
         "500": { $ref: "#/components/responses/Problem" }
-        "501": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
 
   /platform/named-access:
@@ -6173,6 +6274,7 @@ components:
             - invalid_token
             - duplicate
             - email_in_use
+            - below_minimum
         detail: { type: string, description: Fixed per code; never echoes input. }
         request_id: { type: string }
     PlatformProblem:
@@ -6778,6 +6880,139 @@ components:
         version: { type: string, nullable: true, description: "The activated rule set version; null is shadow." }
         sha256: { type: string, nullable: true, description: "The activated rule set file's SHA-256, hex." }
         activated_at: { type: string, format: date-time, nullable: true }
+    PlatformSettings:
+      type: object
+      description: The platform settings (mhai-web settings-contract.ts SettingsOut). Added in 1.43.0.
+      required: [retention, triage, feedback_buffer, pending]
+      additionalProperties: false
+      properties:
+        retention:
+          type: object
+          required: [confirmed, paused, paused_by, paused_at, version, items]
+          additionalProperties: false
+          properties:
+            confirmed: { type: boolean }
+            paused: { type: boolean }
+            paused_by: { allOf: [{ $ref: "#/components/schemas/Person" }], nullable: true }
+            paused_at: { type: string, format: date-time, nullable: true }
+            version: { type: integer, minimum: 1 }
+            items:
+              type: array
+              items:
+                type: object
+                required: [type, days, minimum_days, last_run, next_run_at, changed_by, changed_at, version]
+                additionalProperties: false
+                properties:
+                  type: { type: string, enum: [records, documents, pending_corrections, audit_log] }
+                  days: { type: integer, minimum: 1 }
+                  minimum_days: { type: integer, minimum: 1 }
+                  last_run:
+                    type: object
+                    nullable: true
+                    description: Always null until a clean-up runs by these periods.
+                    required: [at, ok, deleted, kept_for_holds]
+                    properties:
+                      at: { type: string, format: date-time }
+                      ok: { type: boolean }
+                      deleted: { type: integer }
+                      kept_for_holds: { type: integer }
+                  next_run_at: { type: string, format: date-time, nullable: true }
+                  changed_by: { allOf: [{ $ref: "#/components/schemas/Person" }], nullable: true }
+                  changed_at: { type: string, format: date-time, nullable: true }
+                  version: { type: integer, minimum: 1 }
+        triage:
+          type: object
+          required: [enabled, ready, not_ready_reason, changed_by, changed_at, version]
+          additionalProperties: false
+          properties:
+            enabled: { type: boolean }
+            ready: { type: boolean }
+            not_ready_reason: { type: string, enum: [missing_report, missing_files, checksum_mismatch], nullable: true }
+            changed_by: { allOf: [{ $ref: "#/components/schemas/Person" }], nullable: true }
+            changed_at: { type: string, format: date-time, nullable: true }
+            version: { type: integer, minimum: 1 }
+        feedback_buffer:
+          type: object
+          required: [waiting, last_reset, running, failed_job_id]
+          additionalProperties: false
+          properties:
+            waiting: { type: integer, minimum: 0 }
+            last_reset:
+              type: object
+              nullable: true
+              required: [by, at, reason, cleared]
+              additionalProperties: false
+              properties:
+                by: { $ref: "#/components/schemas/Person" }
+                at: { type: string, format: date-time }
+                reason: { type: string }
+                cleared: { type: integer, minimum: 0 }
+            running:
+              type: object
+              nullable: true
+              description: Always null (the reset runs in its request).
+              required: [job_id, started_at]
+              properties:
+                job_id: { type: string }
+                started_at: { type: string, format: date-time }
+            failed_job_id: { type: string, nullable: true }
+        pending:
+          type: array
+          items:
+            type: object
+            required: [id, kind, requested_by, requested_at, reason, requested_by_you, expires_at, version, type, from, to]
+            additionalProperties: false
+            properties:
+              id: { type: string, format: uuid }
+              kind: { type: string, enum: [retention_shorten] }
+              requested_by: { $ref: "#/components/schemas/Person" }
+              requested_at: { type: string, format: date-time }
+              reason: { type: string }
+              requested_by_you: { type: boolean }
+              expires_at: { type: string, format: date-time }
+              version: { type: integer, minimum: 1, description: "The setting's version, which approve and cancel send." }
+              type: { type: string, enum: [records, documents, pending_corrections, audit_log] }
+              from: { type: integer, minimum: 1 }
+              to: { type: integer, minimum: 1 }
+    PlatformNotifications:
+      type: object
+      description: The bell's notifications (mhai-web notifications-contract.ts NotificationsOut). Added in 1.43.0.
+      required: [items, unseen]
+      additionalProperties: false
+      properties:
+        unseen: { type: integer, minimum: 0 }
+        items:
+          type: array
+          maxItems: 20
+          items:
+            oneOf:
+              - type: object
+                required: [kind, id, change_id, hospital, summary, serious, direction, measure, previous, current, at, seen]
+                additionalProperties: false
+                properties:
+                  kind: { type: string, enum: [analytics_change] }
+                  id: { type: string, pattern: "^ntf_[0-9a-f-]{36}$" }
+                  change_id: { type: string, format: uuid }
+                  hospital: { allOf: [{ $ref: "#/components/schemas/Person" }], nullable: true }
+                  summary: { type: string }
+                  serious: { type: boolean }
+                  direction: { type: string, enum: [rising, falling, worse, better] }
+                  measure: { type: string, enum: [questions, needs_review_share, agreement_rate] }
+                  previous: { type: object, description: "Guarded exactly as on the change." }
+                  current: { type: object, description: "Guarded exactly as on the change." }
+                  at: { type: string, format: date-time }
+                  seen: { type: boolean }
+              - type: object
+                required: [kind, id, run_id, first_broken_seq, first_broken_id, at, seen]
+                additionalProperties: false
+                properties:
+                  kind: { type: string, enum: [audit_integrity] }
+                  id: { type: string, pattern: "^ntf_audit_[0-9a-f-]{36}$" }
+                  run_id: { type: string, format: uuid }
+                  first_broken_seq: { type: integer, minimum: 1 }
+                  first_broken_id: { type: string }
+                  at: { type: string, format: date-time }
+                  seen: { type: boolean }
     TeamMember:
       type: object
       description: A platform team member. Added in 1.26.0.

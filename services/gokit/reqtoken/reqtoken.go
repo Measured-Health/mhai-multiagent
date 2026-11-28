@@ -82,7 +82,7 @@ var (
 var (
 	ErrMintClaims   = errors.New("reqtoken: refused to mint: missing or invalid claims")
 	ErrMintTTL      = errors.New("reqtoken: refused to mint: lifetime under a second or over the cap for its kind")
-	ErrMintHospital = errors.New("reqtoken: refused to mint: a hospital id is required outside jobs.v1.global")
+	ErrMintHospital = errors.New("reqtoken: refused to mint: a hospital id is required outside jobs.v1.global and the platform link")
 	errNoKey        = errors.New("reqtoken: signer has no key")
 	errKey          = errors.New("reqtoken: cannot load the request-token signing key (want a PEM PKCS#8 Ed25519 private key)")
 )
@@ -116,7 +116,7 @@ func Reason(err error) string {
 type Claims struct {
 	Aud         string   // aud: the service
 	Sub         string   // sub: the user id, or SvcCore
-	Hid         string   // hid: "" only on jobs.v1.global.*
+	Hid         string   // hid: "" only on jobs.v1.global.* and PlatformLinkSubject
 	Roles       []string // roles at mint time
 	Rid         string   // rid: the request id
 	Jti         string   // jti: 128 random bits, base64url
@@ -389,6 +389,18 @@ func (s Signer) mint(c Claims, bh string, ttl time.Duration) (string, Claims, er
 	return tok, out, nil
 }
 
+// PlatformLinkSubject is the one control call made for no hospital: a
+// platform team member's invite (notify.v1.ctl.send_platform_link; the
+// account has no hospital).
+const PlatformLinkSubject = "notify.v1.ctl.send_platform_link"
+
+// NoHospitalSubject reports whether a token for subject carries no
+// hospital: the global jobs and PlatformLinkSubject, exactly. Every other
+// subject's token names one.
+func NoHospitalSubject(subject string) bool {
+	return strings.HasPrefix(subject, "jobs.v1.global.") || subject == PlatformLinkSubject
+}
+
 // validateMint refuses claims core must never sign: core fails closed on
 // its own mistakes before a worker has to.
 func validateMint(c Claims) error {
@@ -398,8 +410,7 @@ func validateMint(c Claims) error {
 	if _, ok := maxTTL(c.Kind); !ok || !isName(c.Aud) {
 		return ErrMintClaims
 	}
-	global := strings.HasPrefix(c.Subject, "jobs.v1.global.")
-	if c.Hid == "" && !global {
+	if c.Hid == "" && !NoHospitalSubject(c.Subject) {
 		return ErrMintHospital // F10, spec §7.2
 	}
 	if c.Hid != "" && !isUUID(c.Hid) {
@@ -502,7 +513,7 @@ func VerifyAt(tok string, keys map[string]ed25519.PublicKey, want Expect, body [
 	case via != ViaCore && via != ViaGrant,
 		knd == KindReq && p.Rpl == "",
 		knd == KindJob && (present["rpl"] || via != ViaCore),
-		p.Hid == "" && !strings.HasPrefix(p.Nsub, "jobs.v1.global."),
+		p.Hid == "" && !NoHospitalSubject(p.Nsub),
 		p.Iat <= 0 || p.Exp <= 0 || p.Iat > maxTime || p.Exp > maxTime, // so exp-iat can't overflow
 		p.Exp <= p.Iat,
 		p.Exp-p.Iat > int64(limit/time.Second),
