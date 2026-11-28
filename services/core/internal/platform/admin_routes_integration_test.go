@@ -534,14 +534,9 @@ func TestNotImplementedRoutes(t *testing.T) {
 	aud := mint(t, auditor(t))
 	id := uuid.NewString()
 	for _, c := range []struct{ method, path string }{
-		{"GET", "/platform/notifications"}, {"POST", "/platform/notifications/seen"},
-		{"GET", "/platform/settings"}, {"GET", "/platform/settings/retention/questions/preview"},
-		{"PUT", "/platform/settings/retention/questions"}, {"PUT", "/platform/settings/retention-pause"},
-		{"PUT", "/platform/settings/triage"}, {"POST", "/platform/settings/requests/" + id + "/approve"},
-		{"POST", "/platform/settings/requests/" + id + "/cancel"}, {"POST", "/platform/settings/feedback-buffer/reset"},
 		{"GET", "/platform/named-access"}, {"POST", "/platform/named-access/requests"},
 		{"POST", "/platform/named-access/requests/" + id + "/approve"}, {"POST", "/platform/named-access/requests/" + id + "/cancel"},
-		{"POST", "/platform/named-access/lower"}, {"POST", "/platform/team/invites"},
+		{"POST", "/platform/named-access/lower"},
 	} {
 		body := ""
 		if c.method != "GET" {
@@ -552,7 +547,7 @@ func TestNotImplementedRoutes(t *testing.T) {
 			problem(t, "auditor "+c.method+" "+c.path, send(t, handler, c.method, c.path, aud, body), 403, "forbidden")
 		}
 	}
-	problem(t, "no two-step", get(t, "/platform/settings", signIn(t, platformAdmin(t), false).tok), 403, "mfa_required")
+	problem(t, "no two-step", get(t, "/platform/named-access", signIn(t, platformAdmin(t), false).tok), 403, "mfa_required")
 }
 
 // A lift request outlives no change to its requester: a requester who is

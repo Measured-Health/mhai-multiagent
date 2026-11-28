@@ -110,6 +110,12 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		"account_tokens":           "00059: the first admin's invite of a hospital its own transaction adds (column INSERT); invite rows without token_hash, for the first admin's status (column SELECT)",
 		"message_outbox":           "00059: the first admin's invite row of a hospital its own transaction adds (column INSERT)",
 		"hospital_deactivations":   "00060: who deactivated a hospital and why (SELECT); an open record for a hospital now deactivated (column INSERT); closing it on reactivation (column UPDATE)",
+		"platform_retention":       "00062: the retention periods (SELECT; column UPDATE of days, version and who changed it; a shorter period only with an approved two-person request, by trigger)",
+		"platform_setting_requests": "00062: the two-person shorter-period requests (SELECT, column INSERT, column UPDATE of an open one)",
+		"platform_retention_pause": "00062: the clean-up pause (SELECT, column UPDATE)",
+		"platform_setting_log":     "00062: each settings write's reason (SELECT, column INSERT)",
+		"platform_feedback_resets": "00062: the learning-data resets, written by the reset definer (SELECT)",
+		"platform_notifications_seen": "00062: which notifications each platform member has seen (SELECT, column INSERT)",
 	}
 	got := map[string]bool{}
 	rows, err := pool.Query(ctx, `
@@ -162,6 +168,10 @@ func TestPlatformRoleHasNoClinicalRows(t *testing.T) {
 		"mhai_hold_lift_approved":      {"hid uuid", "boolean"},
 		"mhai_platform_mfa_enabled":    {"uid uuid", "boolean"},
 		"mhai_feedback_buffer_waiting": {"", "bigint"},
+		// 00062: a retention period's preview (counts), and the
+		// learning-data reset (marks waiting rows cleared).
+		"mhai_retention_preview":     {"p_type text, p_days integer", "bigint"},
+		"mhai_feedback_buffer_reset": {"p_by uuid, p_reason text", "TABLE(reset_id uuid, cleared integer)"},
 		"mhai_cloud_usage":             {"p_hospital uuid", "TABLE(month date, used bigint, reserved bigint)"},
 		"emr_platform_health":          {"", "TABLE(connection_id uuid, health text, last_sync_at timestamp with time zone, last_sync_ok boolean, last_sync_records integer, errors_24h bigint)"},
 		"emr_platform_errors":          {"p_connection uuid", "TABLE(at timestamp with time zone, code text, count bigint)"},

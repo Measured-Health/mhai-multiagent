@@ -92,6 +92,21 @@ func TestSendLinkOverNATS(t *testing.T) {
 		got.GetPurpose() != "password_reset" || got.GetExpiresAt() != msg.ExpiresAt.Unix() {
 		t.Fatalf("claims %+v request %v", claims, &got)
 	}
+	// A platform team member's invite: send_platform_link, no hospital in
+	// the token, on the real NATS permissions.
+	pm := delivery.Message{Kind: delivery.Invite, Recipient: user, Link: link, ExpiresAt: time.Now().Add(time.Hour)}
+	if err := s.Send(ctx, pm); err != nil {
+		t.Fatalf("platform invite: %v", err)
+	}
+	if claims.Hid != "" || claims.Subject != "notify.v1.ctl.send_platform_link" || got.GetPurpose() != "invite" {
+		t.Fatalf("platform invite claims %+v request %v", claims, &got)
+	}
+	// No hospital is only for an invite.
+	pr := msg
+	pr.HospitalID = uuid.Nil
+	if err := s.Send(ctx, pr); !errors.Is(err, ErrMisuse) {
+		t.Fatalf("a reset with no hospital: %v", err)
+	}
 	answer = "no_recipient"
 	if err := s.Send(ctx, msg); !errors.Is(err, ErrNotSent) {
 		t.Fatalf("no_recipient: %v", err)

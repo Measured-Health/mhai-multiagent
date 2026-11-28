@@ -529,6 +529,23 @@ func init() {
 	emailMode := OneOf("off", "critical", "critical_and_digest")
 	Register("platform.analytics_email_changed", Schema{Fields: fields("mode", emailMode, "previous", emailMode),
 		Required: []string{"mode", "previous"}})
+	// Platform settings and team invites (00062): the record type, the
+	// periods in days and ids; never a reason, a name or an email.
+	retentionType := OneOf("records", "documents", "pending_corrections", "audit_log")
+	period := Int(1, 36500)
+	Register("platform.retention_changed", Schema{Fields: fields("type", retentionType, "from", period, "to", period),
+		Required: []string{"type", "from", "to"}})
+	for _, a := range []string{"platform.setting_change_requested", "platform.setting_change_approved",
+		"platform.setting_change_cancelled", "platform.setting_change_lapsed"} {
+		Register(a, Schema{Fields: fields("request_id", id, "type", retentionType, "from", period, "to", period),
+			Required: []string{"request_id", "type", "from", "to"}})
+	}
+	Register("platform.clean_up_paused", Schema{Fields: fields()})
+	Register("platform.clean_up_resumed", Schema{Fields: fields()})
+	Register("platform.feedback_buffer_cleared", Schema{Fields: fields("reset_id", id, "cleared", count),
+		Required: []string{"reset_id", "cleared"}})
+	Register("platform.team_invited", Schema{Fields: fields("user_id", id, "role", teamRole),
+		Required: []string{"user_id", "role"}})
 	removed := fields("via", OneOf("cli"))
 	for _, k := range HospitalDataRemovedKeys {
 		removed[k] = count

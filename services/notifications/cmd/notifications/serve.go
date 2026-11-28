@@ -135,10 +135,12 @@ func newSender(s config.Settings, chans map[string]channel.Channel, st deliver.S
 		Breaker: deliver.NewBreaker()}
 }
 
-// newLinkHandler serves send_link (PR 5) on the email channel; without
-// one, every link answers not_ready and nothing is sent.
+// newLinkHandler serves send_link (PR 5) and send_platform_link (a platform
+// team member's invite) on the email channel; without one, every link
+// answers not_ready and nothing is sent.
 func newLinkHandler(s config.Settings, chans map[string]channel.Channel, pool *pgxpool.Pool, log *slog.Logger) *link.Handler {
-	return &link.Handler{Store: link.NewPG(pool), Email: chans[config.ChannelEmail], Log: log,
+	pg := link.NewPG(pool)
+	return &link.Handler{Store: pg, Platform: pg, Email: chans[config.ChannelEmail], Log: log,
 		Limits: deliver.Limits{Recipient: s.RecipientPerHour, Hospital: s.HospitalPerHour}}
 }
 
@@ -233,12 +235,14 @@ func serveUntil(ctx context.Context, getenv func(string) string, w io.Writer, st
 	}
 	defer nc.Close()
 
+	links := newLinkHandler(s, chans, pool, log)
 	r := &ctl.Responder{
-		Keys:     func() map[string]ed25519.PublicKey { return keys },
-		Replay:   replay.New(ctl.ReplayWindow, ctl.MaxReplayIDs),
-		Handlers: map[string]ctl.Handler{"health": healthHandler(db, s.Channels), "send_link": newLinkHandler(s, chans, pool, log).Handle},
-		Log:      log,
-		Metrics:  &ctl.Metrics{},
+		Keys:   func() map[string]ed25519.PublicKey { return keys },
+		Replay: replay.New(ctl.ReplayWindow, ctl.MaxReplayIDs),
+		Handlers: map[string]ctl.Handler{"health": healthHandler(db, s.Channels), "send_link": links.Handle,
+			"send_platform_link": links.HandlePlatform},
+		Log:     log,
+		Metrics: &ctl.Metrics{},
 	}
 	stopCtl, err := r.Serve(ctx, nc)
 	if err != nil {

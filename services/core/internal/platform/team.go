@@ -17,9 +17,11 @@ package platform
 //     sessions, denylisted after commit so its tokens stop at once on every
 //     replica. 409 last_admin for the last active platform admin.
 //     Audited platform.team_member_removed.
-//   - POST /platform/team/invites: 501 not_implemented. Core sends no
-//     invitation and keeps no invite: platform accounts are made with
-//     "core users create" (the provisioning CLI).
+//   - POST /platform/team/invites: team_invite.go. An invited member is
+//     listed with status invite_pending until their first sign-in (no
+//     two-step yet), and is never one of the active platform admins the
+//     last-admin rule counts. "core users create" (the provisioning CLI)
+//     still makes accounts too.
 //
 // Every team write takes one transaction advisory lock, so the last-admin
 // rule holds when two admins act at once. The provisioning CLI's user
@@ -62,7 +64,7 @@ func registerTeam(m *authz.Mux, d Deps) {
 	stepUp := write
 	stepUp.StepUp = true
 	authz.Route(m, http.MethodGet, "/platform/team", read, http.HandlerFunc(d.teamList))
-	authz.Route(m, http.MethodPost, "/platform/team/invites", write, http.HandlerFunc(notImplemented))
+	authz.Route(m, http.MethodPost, "/platform/team/invites", stepUp, http.HandlerFunc(d.teamInvite))
 	authz.Route(m, http.MethodPatch, "/platform/team/{id}", stepUp, http.HandlerFunc(d.teamPatch))
 	authz.Route(m, http.MethodDelete, "/platform/team/{id}", stepUp, http.HandlerFunc(d.teamDelete))
 }
@@ -87,6 +89,7 @@ const teamSelect = `SELECT u.id, u.display_name, u.email::text,
 		     THEN 'platform_admin' ELSE 'auditor' END,
 		mhai_platform_mfa_enabled(u.id),
 		u.last_login_at,
+		u.invited_at IS NOT NULL AND u.last_login_at IS NULL,
 		COALESCE((SELECT v.version FROM platform_member_versions v WHERE v.user_id = u.id), 1)
 	FROM users u
 	WHERE u.hospital_id IS NULL AND u.is_active
@@ -96,10 +99,14 @@ func scanMember(row pgx.Row, you uuid.UUID) (TeamMember, error) {
 	var m TeamMember
 	var id uuid.UUID
 	var last *time.Time
-	if err := row.Scan(&id, &m.Name, &m.Email, &m.Role, &m.MFAEnabled, &last, &m.Version); err != nil {
+	var pending bool
+	if err := row.Scan(&id, &m.Name, &m.Email, &m.Role, &m.MFAEnabled, &last, &pending, &m.Version); err != nil {
 		return m, err
 	}
 	m.ID, m.Status, m.IsYou = id.String(), "active", id == you
+	if pending {
+		m.Status = "invite_pending"
+	}
 	if last != nil {
 		s := stamp(*last)
 		m.LastSignInAt = &s
@@ -164,11 +171,13 @@ func teamLock(ctx context.Context, tx pgx.Tx) error {
 	return err
 }
 
-// otherAdmins counts the active platform admins other than id.
+// otherAdmins counts the active platform admins other than id. An
+// invited admin who has never signed in can't act, so isn't counted.
 func otherAdmins(ctx context.Context, tx pgx.Tx, id uuid.UUID) (int, error) {
 	var n int
 	err := tx.QueryRow(ctx, `SELECT count(*) FROM users u
 		WHERE u.hospital_id IS NULL AND u.is_active AND u.id <> $1
+		  AND NOT (u.invited_at IS NOT NULL AND u.last_login_at IS NULL)
 		  AND EXISTS (SELECT 1 FROM user_roles r WHERE r.user_id = u.id AND r.role = 'platform_admin')`, id).Scan(&n)
 	return n, err
 }
@@ -344,6 +353,9 @@ func (d Deps) teamPatch(w http.ResponseWriter, r *http.Request) {
 			if err := cancelMemberLifts(r.Context(), tx, p, rid, id); err != nil {
 				return err
 			}
+			if err := cancelMemberRequests(r.Context(), tx, p, rid, id); err != nil {
+				return err
+			}
 		}
 		if err := bumpMember(r.Context(), tx, id); err != nil {
 			return err
@@ -422,6 +434,9 @@ func (d Deps) teamDelete(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if err := cancelMemberLifts(r.Context(), tx, p, rid, id); err != nil {
+			return err
+		}
+		if err := cancelMemberRequests(r.Context(), tx, p, rid, id); err != nil {
 			return err
 		}
 		if err := bumpMember(r.Context(), tx, id); err != nil {

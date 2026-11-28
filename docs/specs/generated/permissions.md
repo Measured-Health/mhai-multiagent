@@ -156,7 +156,7 @@ run `go run ./cmd/permgen` in `services/core` after changing a route.
 | GET | `/api/v1/platform/settings/retention/{id}/preview` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
 | PUT | `/api/v1/platform/settings/triage` | signed in | `platform_admin` | platform | yes | yes | yes |
 | GET | `/api/v1/platform/team` | signed in | `platform_admin`, `auditor` | platform | yes | no | no |
-| POST | `/api/v1/platform/team/invites` | signed in | `platform_admin` | platform | yes | no | yes |
+| POST | `/api/v1/platform/team/invites` | signed in | `platform_admin` | platform | yes | yes | yes |
 | DELETE | `/api/v1/platform/team/{id}` | signed in | `platform_admin` | platform | yes | yes | yes |
 | PATCH | `/api/v1/platform/team/{id}` | signed in | `platform_admin` | platform | yes | yes | yes |
 | POST | `/api/v1/queries` | signed in | `clinician` | clinical | no | no | yes |
