@@ -5221,7 +5221,7 @@ paths:
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, internal_error, not_found]
       parameters:
-        - { name: id, in: path, required: true, description: "The record type.", schema: { type: string, enum: [records, documents, pending_corrections, audit_log] } }
+        - { name: id, in: path, required: true, description: "The record type: records, documents, pending_corrections or audit_log (else 404).", schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
         - { name: days, in: query, required: true, schema: { type: integer, minimum: 1, maximum: 36500 } }
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
@@ -5255,7 +5255,7 @@ paths:
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, internal_error, mfa_invalid, mfa_locked, not_ready, not_found, conflict, below_minimum, rate_limited]
       parameters:
-        - { name: id, in: path, required: true, description: "The record type.", schema: { type: string, enum: [records, documents, pending_corrections, audit_log] } }
+        - { name: id, in: path, required: true, description: "The record type: records, documents, pending_corrections or audit_log (else 404).", schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -5400,7 +5400,7 @@ paths:
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, internal_error, mfa_invalid, mfa_locked, not_ready, not_found, conflict, same_person, expired, rate_limited]
       parameters:
-        - { name: id, in: path, required: true, description: "The request id.", schema: { type: string, format: uuid } }
+        - { name: id, in: path, required: true, description: "The request id (a uuid; else 404).", schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -5444,7 +5444,7 @@ paths:
       security: [{ ServiceKey: [], Bearer: [] }]
       x-error-codes: [unauthenticated, token_expired, mfa_required, forbidden, not_platform, validation_failed, internal_error, not_ready, not_found, conflict, rate_limited]
       parameters:
-        - { name: id, in: path, required: true, description: "The request id.", schema: { type: string, format: uuid } }
+        - { name: id, in: path, required: true, description: "The request id (a uuid; else 404).", schema: { type: string, pattern: "^[A-Za-z0-9_-]+$" } }
         - $ref: "#/components/parameters/ClientIP"
         - $ref: "#/components/parameters/Audience"
         - $ref: "#/components/parameters/IdempotencyKey"
