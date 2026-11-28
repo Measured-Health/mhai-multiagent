@@ -55,7 +55,7 @@ func TestPasswordResetLink(t *testing.T) {
 	mustCode(t, "missing password", e.do(t, req{method: "POST", path: "/auth/password/reset", body: map[string]any{"token": plain}}), 422, "validation_failed")
 	mustCode(t, "weak password", e.reset(t, plain, "short", newIP()), 422, "weak_password")
 	r := e.reset(t, plain, resetPW, newIP())
-	if r.code != 204 {
+	if r.code != 200 || r.body["sign_in"] != "clinical" {
 		t.Fatalf("reset %d %s", r.code, r.raw)
 	}
 	hasAction(t, r, "auth.password.reset")
@@ -104,7 +104,7 @@ func TestInviteLinkSetsFirstPassword(t *testing.T) {
 		t.Fatalf("an invitee signed in before choosing a password: %d", x.code)
 	}
 	plain := seedToken(t, h, id, "invite", "6 days")
-	if r := e.reset(t, plain, resetPW, newIP()); r.code != 204 {
+	if r := e.reset(t, plain, resetPW, newIP()); r.code != 200 || r.body["sign_in"] != "clinical" {
 		t.Fatalf("accept %d %s", r.code, r.raw)
 	}
 	if x := e.login(t, email, resetPW, newIP()); x.code != 200 {
@@ -130,7 +130,7 @@ func TestResetTokenSingleUseUnderRace(t *testing.T) {
 	won := 0
 	for _, c := range codes {
 		switch c {
-		case 204:
+		case 200:
 			won++
 		case 410:
 		default:

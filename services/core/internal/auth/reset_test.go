@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/Measured-Health/mhai-multiagent/services/core/internal/httpx"
 )
 
@@ -41,5 +43,18 @@ func TestResetPasswordRefusalsBeforeAnyLookup(t *testing.T) {
 		if w.Code != c.status || !strings.Contains(w.Body.String(), `"`+c.code+`"`) {
 			t.Errorf("%s: %d %s", c.name, w.Code, w.Body.String())
 		}
+	}
+}
+
+// After a link works, the reply names the app to sign in to: a platform
+// account (no hospital) the platform admin app, a hospital's the clinical
+// app.
+func TestResetSignInApp(t *testing.T) {
+	h := uuid.New()
+	if got := resetSignIn(&acctRec{HospitalID: &h, Roles: []string{"clinician"}}); got != "clinical" {
+		t.Fatalf("hospital account: %q", got)
+	}
+	if got := resetSignIn(&acctRec{Roles: []string{"platform_admin"}}); got != "platform" {
+		t.Fatalf("platform account: %q", got)
 	}
 }

@@ -394,7 +394,7 @@ func TestHospitalAddInviteAcceptedAndExpired(t *testing.T) {
 	req.Header.Set("Idempotency-Key", "k-"+uniq())
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusNoContent {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"sign_in":"clinical"`) {
 		t.Fatalf("redeem: %d %s", w.Code, w.Body.String())
 	}
 	g := get(t, "/platform/hospitals/"+hid, tok)
