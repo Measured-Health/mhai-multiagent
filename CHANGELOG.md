@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **`POST /auth/password/reset` says where to sign in (OpenAPI 1.44.0).** It now answers
+  200 `{"sign_in": "clinical" | "platform"}` instead of 204: `platform` for
+  a platform account (no hospital), so a platform team member who accepts
+  an invite on the clinical app's set-password page is sent to the
+  platform admin app's sign-in, not the clinical one that refuses them.
+  Only after the link worked, so it never tells whether an email has an
+  account. mhai-web reads it; an older BFF ignores the body.
+
 ### Added
 
 - **Platform settings, notifications and team invites (OpenAPI 1.43.0,

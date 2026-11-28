@@ -90,8 +90,16 @@ SERVED_TEXT = re.compile(
     r"|added the new required `query` request parameter `days`"
     r"|removed the success response with the status `200`)$"
 )
+# Core 1.44.0 (#308, 28 Nov 2026): POST /auth/password/reset answers 200
+# {sign_in} instead of 204, so a platform invitee is sent to the platform
+# sign-in. The only callers are the two web BFFs, which read 200 {sign_in}
+# and still treat a 204 from an older core as the clinical app. This
+# matches only that one finding on that one route.
+RESET_ID = "response-success-status-removed"
+RESET_OPS = {("POST", "/auth/password/reset")}
+RESET_TEXT = re.compile(r"^removed the success response with the status `204`$")
 findings = json.load(open(sys.argv[1])) or []
-kept, allowed, one_code, new_type, served = [], 0, 0, 0, 0
+kept, allowed, one_code, new_type, served, reset = [], 0, 0, 0, 0, 0
 for f in findings:
     if f.get("id") == ALLOWED_ID and ALLOWED_TEXT.match(f.get("text", "")):
         allowed += 1
@@ -104,8 +112,13 @@ for f in findings:
     elif (f.get("id") in SERVED_IDS and (f.get("operation"), f.get("path")) in SERVED_OPS
           and SERVED_TEXT.match(f.get("text", ""))):
         served += 1
+    elif (f.get("id") == RESET_ID and (f.get("operation"), f.get("path")) in RESET_OPS
+          and RESET_TEXT.match(f.get("text", ""))):
+        reset += 1
     else:
         kept.append(f)
+if reset:
+    print(f"openapi-breaking: {reset} password reset 204 -> 200 {{sign_in}} finding(s) allowed (OpenAPI 1.44.0)")
 if served:
     print(f"openapi-breaking: {served} finding(s) on the formerly 501 settings and invite operations allowed (OpenAPI 1.43.0)")
 if one_code:

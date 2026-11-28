@@ -52,7 +52,8 @@ func readLiveToken(ctx context.Context, tx pgx.Tx, hash string) (liveToken, erro
 	return t, err
 }
 
-// resetPassword: POST /auth/password/reset {token, new_password} → 204.
+// resetPassword: POST /auth/password/reset {token, new_password} → 200
+// {sign_in}.
 // Public: the link's holder isn't signed in. It redeems both a hospital
 // admin's reset link and an invite (the invited person's first password).
 //
@@ -73,6 +74,10 @@ func readLiveToken(ctx context.Context, tx pgx.Tx, hash string) (liveToken, erro
 //     records a security notice (security_password_reset) in that
 //     transaction. The person then signs in as usual
 //     (and enrols two-step if they have none).
+//   - The reply says which app that is (resetSignIn): "platform" for a
+//     platform account (a team member's invite opens the clinical app's
+//     page too), else "clinical". Only after the link worked, so it never
+//     tells whether an email has an account.
 func (s *Service) resetPassword(w http.ResponseWriter, r *http.Request) {
 	var in resetRequest
 	if !httpx.Decode(w, r, &in) {
@@ -218,5 +223,20 @@ func (s *Service) resetPassword(w http.ResponseWriter, r *http.Request) {
 	if err := s.denyAll(ctx, jtis); err != nil {
 		s.log().Error("auth: denylist write failed after password reset", "request_id", rid, "user_id", uid)
 	}
-	w.WriteHeader(http.StatusNoContent)
+	httpx.JSON(w, http.StatusOK, resetReply{SignIn: resetSignIn(acct)})
+}
+
+// resetReply is POST /auth/password/reset's success body.
+type resetReply struct {
+	SignIn string `json:"sign_in"`
+}
+
+// resetSignIn is the app an account signs in to after choosing its
+// password: a platform account (no hospital, 00001) the platform admin
+// app, everyone else the clinical app.
+func resetSignIn(a *acctRec) string {
+	if a.HospitalID == nil {
+		return "platform"
+	}
+	return "clinical"
 }

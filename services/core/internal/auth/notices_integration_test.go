@@ -106,7 +106,7 @@ func TestSecurityNoticeResetLinkNotInvite(t *testing.T) {
 	e := newEnv(t)
 	u, _ := loggedIn(t, e)
 	plain := seedToken(t, hospitalOf(t, u.id), u.id, "password_reset", "29 minutes")
-	if r := e.reset(t, plain, noticePW, newIP()); r.code != 204 {
+	if r := e.reset(t, plain, noticePW, newIP()); r.code != 200 {
 		t.Fatalf("reset %d %s", r.code, r.raw)
 	}
 	oneNotice(t, u.id, delivery.NoticePasswordReset)
@@ -119,7 +119,7 @@ func TestSecurityNoticeResetLinkNotInvite(t *testing.T) {
 	// An invite's link sets a first password: no notice.
 	v := clinician(t)
 	inv := seedToken(t, hospitalOf(t, v.id), v.id, "invite", "29 minutes")
-	if r := e.reset(t, inv, noticePW, newIP()); r.code != 204 {
+	if r := e.reset(t, inv, noticePW, newIP()); r.code != 200 {
 		t.Fatalf("invite %d %s", r.code, r.raw)
 	}
 	if n := notices(t, v.id, ""); n != 0 {
